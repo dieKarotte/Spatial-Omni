@@ -1,4 +1,5 @@
 # Spatial-Omni: Spatial Audio Understanding Integration in Multimodal LLMs via FOA Encoding
+<img src="figures/model.png" alt="Spatial-Omni" width="800"/>
 
 Recent multimodal large language models mainly process audio as monaural signals, thereby discarding the spatial cues contained in spatial audio for sound localization, spatial relation reasoning, and spatial scene understanding. We propose Spatial-Omni, a lightweight method that implements SO-Encoder to inject First-Order Ambisonics (FOA) spatial audio into existing Omni LLMs as an independent modality, without modifying their original audio encoders. SO-Encoder provides spatial tokens with limited additional context cost and improves spatial audio understanding through efficient staged training. To support training and evaluation, we construct SO-Dataset, SO-QA, and SO-Bench from open-source data, real recordings, and simulations, containing 400K FOA spatial audio clips and 2.1M spatial question answering pairs. SO-Bench covers 16 spatial audio understanding subtasks, including basic detection and location estimation, spatial relation understanding, and complex spatial reasoning. Experiments show that Spatial-Omni outperforms existing open-source Large Audio-Language Models (LALMs) and Omni LLM models on spatial audio understanding tasks while retaining a reasonable level of general audio understanding.
 
@@ -588,9 +589,19 @@ Spatial-Omni/
 
 ## 8. Citations
 
-If you use Spatial-Omni in academic work, please cite Qwen2.5-Omni / Qwen3-Omni,
-Microsoft BEATs, and the DCASE 2024 SELD baseline as upstream contributions.
+If you use Spatial-Omni in academic work, please cite us as follows:
 
+```bibtex
+@misc{zhu2026spatialomnispatialaudiounderstanding,
+      title={Spatial-Omni: Spatial Audio Understanding Integration in Multimodal LLMs via FOA Encoding},
+      author={Zhiyuan Zhu and Yixuan Chen and Yiwen Shao and Wenxiang Guo and Changhao Pan and Yu Zhang and Yuxiang Wang and Wei Liu and Houhua Zhang and Chengkuan Zeng and Wenbo Cheng and Yunxi Liu and Rui Yang and Steve Yves and Liefeng Bo and Zhou Zhao},
+      year={2026},
+      eprint={2606.10738},
+      archivePrefix={arXiv},
+      primaryClass={eess.AS},
+      url={https://arxiv.org/abs/2606.10738},
+}
+```
 ---
 
 ## 9. License
