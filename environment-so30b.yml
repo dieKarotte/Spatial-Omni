@@ -1,0 +1,42 @@
+# Conda environment for SO-30B (Qwen3-Omni + SO-Encoder) DDP training on H20.
+#
+# The machine may report "CUDA Version: 12.9" in nvidia-smi. That is the driver
+# capability, not a requirement that the PyTorch wheel must be cu129. The cu128
+# wheel is the stable target here and runs on a 12.9-capable driver.
+#
+# After creating the env, install the local Qwen3 transformers fork with:
+#   conda activate so-30b
+#   cd /path/to/transformers && pip install -e .
+# Then launch with QWEN3_OMNI_FORK=/path/to/transformers/src.
+name: so-30b
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip>=25
+  - setuptools
+  - wheel
+  - git
+  - ffmpeg
+  - libsndfile
+  - pip:
+      - --index-url https://download.pytorch.org/whl/cu128
+      - --extra-index-url https://pypi.org/simple
+      - torch==2.9.0
+      - torchaudio==2.9.0
+      - accelerate>=1.8.0
+      - peft>=0.18.0
+      - huggingface-hub>=1.3.0,<2.0
+      - hf-transfer>=0.1.9
+      - tokenizers>=0.22.0,<0.23.0
+      - safetensors>=0.4.5
+      - soundfile>=0.12.1
+      - librosa>=0.10.2
+      - scipy>=1.11.0
+      - numpy>=1.26.0,<3.0.0
+      - tqdm>=4.66.0
+      - tensorboard>=2.14.0
+      - einops>=0.7.0
+      - packaging>=24.0
+      - psutil>=5.9.0
+      - ipython>=8.0.0

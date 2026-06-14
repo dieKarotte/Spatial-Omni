@@ -33,10 +33,9 @@ The two evaluation assets are:
 3. [SO-Encoder pretraining & evaluation](#3-so-encoder-pretraining--evaluation) — `train_so_pretrain` + `bench_so_encoder`
 4. [SO-7B QA fine-tuning (3 stages)](#4-so-7b-qa-fine-tuning-3-stages) — `train_so_qa` + SO-30B / IV / SELD variants
 5. [Inference & evaluation on SO-Bench](#5-inference--evaluation-on-so-bench) — `bench_test_generate` + `score_test_predictions`
-6. [Smoke tests](#6-smoke-tests) — unit + end-to-end install verification
-7. [Repository layout](#7-repository-layout)
-8. [Citations](#8-citations)
-9. [License](#9-license)
+6. [Repository layout](#6-repository-layout)
+7. [Citations](#7-citations)
+8. [License](#8-license)
 
 ---
 
@@ -89,7 +88,10 @@ export SO_ENCODER_CKPT=/path/to/so_encoder_pretrained.pt
 #    location. Set only if you launch trainers from a different cwd.
 # export SO_REPO=$PWD
 
-# 6) (Optional) DCASE 2024 SELD baseline — ONLY for the SELD path
+# 6) (Optional) DCASE 2024 SELD baseline — vendored under
+#    spatial_omni/encoders/seldnet/, so an external checkout is NOT needed.
+#    Set DCASE_BASELINE_REPO only if you want to use a different fork or
+#    point at an external SELD baseline repo (rarely needed).
 # git clone https://github.com/sharathadavanne/seld-dcase2024.git
 # export DCASE_BASELINE_REPO=$PWD/seld-dcase2024
 # export SELD_FEATURE_STATS_DIR=/path/to/seld_feat_label/...
@@ -100,9 +102,6 @@ export SO_ENCODER_CKPT=/path/to/so_encoder_pretrained.pt
 #    unilm tree (rarely needed).
 # export SO_BEATS_REPO=/path/to/unilm/beats
 ```
-
-The repo never hard-codes those paths — every CLI flag falls back to the
-matching env var.
 
 > **Quick start (QA fine-tune & bench only)**: you only need
 > `SO_BASE_MODEL`, `SO_DATASET_ROOT`, and `SO_ENCODER_CKPT` (items 1–3).
@@ -226,23 +225,6 @@ torchrun --nproc_per_node=8 -m spatial_omni.encoders.beats.train_so_pretrain \
   some batches).
 - Single-GPU smoke (`--batch-size 16`, no `--distributed`) also works.
 
-**Step 3 (optional) — 30 s smoke** (8 train + 2 valid clips):
-```bash
-PYTHONPATH=. python scripts/data/build_so_pretrain_manifest.py \
-    --metadata-jsonl $SO_DATASET_ROOT/metadata/train.jsonl \
-    --data-root      $SO_DATASET_ROOT \
-    --output         $SO_DATASET_ROOT/pretrain-train-tiny.jsonl \
-    --filter-missing --max-records 8
-
-PYTHONPATH=. python -m spatial_omni.encoders.beats.train_so_pretrain \
-    --preset ov1 \
-    --ov1-manifest $SO_DATASET_ROOT/pretrain-train-tiny.jsonl \
-    --source-vocab-path $SO_VOCAB --source-num-classes 63 \
-    --pretrained-beats-ckpt $SO_BEATS_TRUNK_CKPT \
-    --batch-size 2 --num-epochs 1 --learning-rate 1e-4 \
-    --output-dir /tmp/so_pretrain_smoke --no-progress
-```
-
 ### 3.2 Evaluate an SO-Encoder checkpoint on the test split
 
 `scripts/bench_so_encoder.py` reuses the trainer's `evaluate_one_epoch`, so
@@ -258,7 +240,7 @@ PYTHONPATH=. python scripts/data/build_so_pretrain_manifest.py \
     --output         $SO_DATASET_ROOT/pretrain-test.jsonl \
     --filter-missing
 
-# 2) Bench (~3 min on 1 GPU, 1.6 K clips)
+# 2) Bench 
 PYTHONPATH=. python scripts/bench_so_encoder.py \
     --checkpoint            /path/to/so_encoder_best.pt \
     --test-manifest         $SO_DATASET_ROOT/pretrain-test.jsonl \
@@ -334,7 +316,7 @@ torchrun --nproc_per_node=4 train_so_qa.py \
 
 Important details:
 
-- `--attn-impl sdpa` is **required**. The default `auto` auto-detects
+- `--attn-impl sdpa` is required. The default `auto` auto-detects
   flash-attn 2 when installed, but the upstream Qwen2.5-Omni
   `_update_causal_mask` raises on `padding_side='right'` + flash-attn 2 and
   the trainer right-pads (label mask is on the right). `sdpa` (PyTorch
@@ -490,7 +472,7 @@ Supported `--baseline` values: `so-7b`, `so-30b`, `zero-spatial`,
 `zero-spatial-30b`, `iv`, `neural-iv`. The driver dispatches to the
 appropriate sub-script based on the baseline.
 
-### 5.5 Diagnostic ablations
+<!-- ### 5.5 Diagnostic ablations
 
 Drop the Qwen mono `<|AUDIO|>` branch entirely (only spatial tokens reach
 the LLM):
@@ -511,50 +493,11 @@ python scripts/bench_test_generate.py \
 ```
 
 Output dirs are auto-suffixed (`__drop_mono_audio`, `__zero` etc.) so you
-don't overwrite the joint baseline.
+don't overwrite the joint baseline. -->
 
 ---
 
-## 6. Smoke tests
-
-### 6.1 Unit / integration
-```bash
-PYTHONPATH=. python tests/test_so_encoder_integration.py     # forward shape
-PYTHONPATH=. python tests/test_generation_decode_offset.py   # tokenizer / decode
-```
-
-### 6.2 End-to-end QA training smoke (~30 s on 1× A100)
-```bash
-PYTHONPATH=. torchrun --nproc_per_node=1 train_so_qa.py \
-    --projector-only \
-    --max-train-samples 8 --max-valid-samples 4 \
-    --batch-size 1 --epochs 1 \
-    --beats-checkpoint $SO_ENCODER_CKPT \
-    --qa-root          $SO_DATASET_ROOT/qa \
-    --audio-root       $SO_DATASET_ROOT \
-    --attn-impl sdpa \
-    --output-dir /tmp/so_smoke
-```
-Expected: `Resumed ...` (or `Loaded ckpt`), training reaches step 8,
-`valid_loss` is finite, `/tmp/so_smoke/checkpoints/best_trainable.pt` is
-written.
-
-### 6.3 End-to-end bench smoke (8 predictions, ~1 min on 1× A100)
-```bash
-PYTHONPATH=. python scripts/bench_test_generate.py \
-    --run-dir ./runs/so7b_stage3 --checkpoint-tags best \
-    --qa-root $SO_DATASET_ROOT/qa --audio-root $SO_DATASET_ROOT \
-    --split test --max-samples 8 \
-    --output-dir /tmp/so7b_smoke
-```
-Expected: 8 lines in `/tmp/so7b_smoke/best/predictions.jsonl`, each with a
-non-empty `prediction`. The startup log should show
-`loaded missing=<N> unexpected=0` (the LoRA `missing_keys` are expected —
-LLM base layers aren't in the trainable-only checkpoint).
-
----
-
-## 7. Repository layout
+## 6. Repository layout
 
 ```
 Spatial-Omni/
@@ -587,7 +530,7 @@ Spatial-Omni/
 
 ---
 
-## 8. Citations
+## 7. Citations
 
 If you use Spatial-Omni in academic work, please cite us as follows:
 
@@ -604,7 +547,7 @@ If you use Spatial-Omni in academic work, please cite us as follows:
 ```
 ---
 
-## 9. License
+## 8. License
 
 Apache 2.0. See [`LICENSE`](LICENSE). Third-party components retain their
 original licenses (Apache 2.0 / MIT).

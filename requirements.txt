@@ -1,0 +1,33 @@
+# Spatial-Omni: Spatial Audio Understanding with LLM
+# Core deep learning
+torch>=2.1.0
+torchaudio>=2.1.0
+
+# Transformers (Qwen2.5-Omni base)
+transformers>=4.51.0
+tokenizers>=0.21.0
+accelerate>=0.26.0
+
+# LoRA fine-tuning
+peft>=0.9.0
+
+# Audio processing
+soundfile>=0.12.0
+librosa>=0.10.0
+numpy>=1.24.0
+
+# Scientific computing
+scipy>=1.10.0
+
+# Training utilities
+tqdm>=4.66.0
+tensorboard>=2.14.0
+
+# Evaluation / metrics
+IPython>=8.0.0
+
+# Optional: flash attention (strongly recommended for training speed)
+# flash-attn>=2.3.0
+
+# Optional: DeepSpeed (for multi-GPU training)
+# deepspeed>=0.12.0

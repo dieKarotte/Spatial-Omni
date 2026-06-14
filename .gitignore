@@ -1,0 +1,93 @@
+# ---------------------------------------------------------------
+# Spatial-Omni .gitignore
+# Keep source code, configs, shell scripts, docs, tests.
+# Exclude run artifacts, caches, large checkpoints, archives, logs.
+# ---------------------------------------------------------------
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtualenvs / env ---
+.venv/
+venv/
+.env
+.envrc
+
+# --- Editor / OS ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*~
+
+# --- Run artifacts (HUGE: 808G+ across these) ---
+runs/
+so_runs/
+so_backbone_qa_runs/
+spatial_qa_runs/
+wandb/
+mlruns/
+outputs/
+
+# --- Precomputed feature/audio caches (HUGE: 110G+) ---
+qwen_audio_cache_*/
+seld_feature_cache_*/
+seld_hidden_cache_*/
+*_cache_v*/
+
+# --- Checkpoints / model weights (precaution) ---
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+*.h5
+
+# --- Audio/video/archive blobs ---
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.flac
+*.wav
+*.mp3
+*.mp4
+*.webm
+*.opus
+*.ogg
+
+# --- Logs ---
+*.log
+log.log
+log_stage*.log
+
+# --- Notebooks scratch ---
+*.ipynb_checkpoints/
+notebooks/scratch/
+
+# --- Project-specific stragglers ---
+/1
+.claude/
+.claude.bak/
+.codex
+af3.tar.gz
+
+# --- SO-Dataset extraction products (large; user-generated) ---
+SO-Dataset/
+so_vocab.csv
+pretrain-*.jsonl
+qa_smoke/
+
+# --- Allow exceptions if needed (uncomment + add) ---
+# !tests/fixtures/**/*.pt

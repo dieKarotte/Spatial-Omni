@@ -1,0 +1,56 @@
+{
+  "_comment": "DeepSpeed ZeRO-3 config for SO-30B (Qwen3-Omni-MoE-30B-A3B) on 8x 40GB A100. NOTE: train_so_qa_qwen3.py does not yet wire DeepSpeed; this file is the asset for stage3 integration. Until the trainer learns deepspeed.initialize / engine.backward, run stage1 with device_map=auto via DEVICE_MAP=auto in the shell.",
+
+  "bf16": {
+    "enabled": true
+  },
+
+  "zero_optimization": {
+    "stage": 3,
+    "offload_optimizer": {
+      "device": "cpu",
+      "pin_memory": true
+    },
+    "offload_param": {
+      "device": "cpu",
+      "pin_memory": true
+    },
+    "overlap_comm": true,
+    "contiguous_gradients": true,
+    "sub_group_size": 1000000000,
+    "reduce_bucket_size": "auto",
+    "stage3_prefetch_bucket_size": "auto",
+    "stage3_param_persistence_threshold": "auto",
+    "stage3_max_live_parameters": 1000000000,
+    "stage3_max_reuse_distance": 1000000000,
+    "stage3_gather_16bit_weights_on_model_save": true
+  },
+
+  "gradient_accumulation_steps": "auto",
+  "train_micro_batch_size_per_gpu": "auto",
+  "train_batch_size": "auto",
+  "gradient_clipping": "auto",
+
+  "optimizer": {
+    "type": "AdamW",
+    "params": {
+      "lr": "auto",
+      "betas": [0.9, 0.999],
+      "eps": 1e-8,
+      "weight_decay": "auto"
+    }
+  },
+
+  "scheduler": {
+    "type": "WarmupDecayLR",
+    "params": {
+      "warmup_min_lr": 0,
+      "warmup_max_lr": "auto",
+      "warmup_num_steps": "auto",
+      "total_num_steps": "auto"
+    }
+  },
+
+  "wall_clock_breakdown": false,
+  "steps_per_print": 200
+}
