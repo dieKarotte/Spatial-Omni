@@ -1,5 +1,7 @@
 # Spatial-Omni: Spatial Audio Understanding Integration in Multimodal LLMs via FOA Encoding
 
+Recent multimodal large language models mainly process audio as monaural signals, thereby discarding the spatial cues contained in spatial audio for sound localization, spatial relation reasoning, and spatial scene understanding. We propose Spatial-Omni, a lightweight method that implements SO-Encoder to inject First-Order Ambisonics (FOA) spatial audio into existing Omni LLMs as an independent modality, without modifying their original audio encoders. SO-Encoder provides spatial tokens with limited additional context cost and improves spatial audio understanding through efficient staged training. To support training and evaluation, we construct SO-Dataset, SO-QA, and SO-Bench from open-source data, real recordings, and simulations, containing 400K FOA spatial audio clips and 2.1M spatial question answering pairs. SO-Bench covers 16 spatial audio understanding subtasks, including basic detection and location estimation, spatial relation understanding, and complex spatial reasoning. Experiments show that Spatial-Omni outperforms existing open-source Large Audio-Language Models (LALMs) and Omni LLM models on spatial audio understanding tasks while retaining a reasonable level of general audio understanding.
+
 **Spatial audio understanding on top of Qwen-Omni.** Spatial-Omni augments
 Qwen2.5-Omni / Qwen3-Omni LLMs with a dedicated spatial encoder (**SO-Encoder**)
 that turns first-order ambisonic (FOA) audio into low-rate spatial tokens, and
@@ -57,50 +59,54 @@ conda activate spatial-omni
 PyTorch ≥ 2.4, transformers = 4.52.0 (or 5.0.0.dev0 fork for SO-30B), peft ≥ 0.10.
 
 ### External dependencies (set once via env vars)
+
+The BEATs model code is **vendored** under `spatial_omni/encoders/beats/`,
+so you do **not** need to clone `microsoft/unilm`. Only the trunk weights
+file is needed, and only for SO-Encoder pretraining.
+
 ```bash
-# 1) Microsoft unilm/BEATs (only needed for SO-Encoder pretraining; the QA
-#    fine-tune flow imports the bundled copy from spatial_omni/encoders/beats)
-git clone https://github.com/microsoft/unilm.git
-export SO_BEATS_REPO=$PWD/unilm/beats
-
-# 2) Upstream BEATs trunk weights (used as warm-start for SO-Encoder pretraining)
-#    Download `BEATs_iter3_plus_AS2M.pt` from https://github.com/microsoft/unilm/tree/master/beats
-#    Place it under $SO_BEATS_REPO/pretrain_ckpt/BEATs_iter3_plus_AS2M.pt/BEATs_iter3_plus_AS2M.pt
-export SO_BEATS_TRUNK_CKPT=$SO_BEATS_REPO/pretrain_ckpt/BEATs_iter3_plus_AS2M.pt/BEATs_iter3_plus_AS2M.pt
-
-# 3) SO-Dataset source-class vocabulary CSV
-#    Ships with the SO-Dataset release; only needed for SO-Encoder pretraining
-#    and bench (QA fine-tune does not use it).
-export SO_VOCAB=/path/to/SO-Dataset/so_vocab.csv
-
-# 4) HuggingFace base model
+# 1) HuggingFace base model (REQUIRED for SO-7B / SO-30B QA fine-tune & bench)
 huggingface-cli download Qwen/Qwen2.5-Omni-7B --local-dir ./Qwen2.5-Omni-7B
 export SO_BASE_MODEL=$PWD/Qwen2.5-Omni-7B
 
-# 4b) (optional) default SO-Encoder checkpoint for the QA fine-tune trainers.
-#     If set, `train_so_qa.py` / `train_iv_qa.py` use it as the default for
-#     `--beats-checkpoint`, so you don't have to repeat the path on every run.
-# export SO_ENCODER_CKPT=/path/to/so_encoder_pretrained.pt
+# 2) SO-Dataset root (REQUIRED for §2/§3/§4/§5)
+#    Download instructions in §2.
+export SO_DATASET_ROOT=/path/to/SO-Dataset
+export SO_VOCAB=$SO_DATASET_ROOT/so_vocab.csv          # ships with the release
 
-# 4c) (optional) repo root used by trainers/bench scripts to locate the bundled
-#     spatial-omni Python package on sys.path. Defaults to the directory of
-#     the script itself; only set this if you launch trainers from a different
-#     working directory.
+# 3) Pretrained SO-Encoder checkpoint (REQUIRED for QA fine-tune & bench)
+#    Either train it yourself via §3.1, or download the released checkpoint.
+export SO_ENCODER_CKPT=/path/to/so_encoder_pretrained.pt
+
+# 4) (Optional) Upstream BEATs trunk weights — ONLY for SO-Encoder pretraining (§3.1).
+#    QA fine-tune (§4) and bench (§5) do NOT need this.
+#    Download `BEATs_iter3_plus_AS2M.pt` from microsoft/unilm releases:
+#    https://github.com/microsoft/unilm/tree/master/beats
+# export SO_BEATS_TRUNK_CKPT=/path/to/BEATs_iter3_plus_AS2M.pt
+
+# 5) (Optional) Repo root for sys.path; auto-detected from the script
+#    location. Set only if you launch trainers from a different cwd.
 # export SO_REPO=$PWD
 
-# 5) (optional) DCASE 2024 SELD baseline (only for SELD path)
-git clone https://github.com/sharathadavanne/seld-dcase2024.git
-export DCASE_BASELINE_REPO=$PWD/seld-dcase2024
-export SELD_FEATURE_STATS_DIR=/path/to/seld_feat_label/...
+# 6) (Optional) DCASE 2024 SELD baseline — ONLY for the SELD path
+# git clone https://github.com/sharathadavanne/seld-dcase2024.git
+# export DCASE_BASELINE_REPO=$PWD/seld-dcase2024
+# export SELD_FEATURE_STATS_DIR=/path/to/seld_feat_label/...
 
-# 6) SO-Dataset root
-export SO_DATASET_ROOT=/path/to/SO-Dataset
+# 7) (Optional) SO_BEATS_REPO — legacy sys.path injection for an external
+#    unilm/beats checkout. The repo's vendored copy works without it; set
+#    only if you want `from BEATs import BEATs` to resolve to an external
+#    unilm tree (rarely needed).
+# export SO_BEATS_REPO=/path/to/unilm/beats
 ```
 
-> **Note**: For the **QA fine-tune flow only** (Section 3), you only need
-> `SO_BASE_MODEL` and `SO_DATASET_ROOT` plus a pretrained SO-Encoder
-> checkpoint (passed via `--beats-checkpoint`). Items 1–3 are required only
-> if you want to *pretrain the SO-Encoder yourself* (Section 3.0).
+The repo never hard-codes those paths — every CLI flag falls back to the
+matching env var.
+
+> **Quick start (QA fine-tune & bench only)**: you only need
+> `SO_BASE_MODEL`, `SO_DATASET_ROOT`, and `SO_ENCODER_CKPT` (items 1–3).
+> Item 4 (BEATs trunk) is required only if you want to *pretrain the
+> SO-Encoder yourself* (§3.1). Items 5–7 are advanced overrides.
 
 ---
 
@@ -287,7 +293,6 @@ recommended schedule, or run the trainers directly:
 |---|---|
 | Qwen2.5-Omni-7B base model | `$SO_BASE_MODEL` (or `--model-id`) |
 | Pretrained SO-Encoder | `$SO_ENCODER_CKPT` (or `--beats-checkpoint`) |
-| BEATs repo (for the wrapper class) | `$SO_BEATS_REPO` (or `--beats-repo`) |
 | QA + audio | `$SO_DATASET_ROOT/qa` and `$SO_DATASET_ROOT` |
 
 ```bash
@@ -354,7 +359,6 @@ torchrun --nproc_per_node=8 train_so_qa.py \
     --audio-root $SO_DATASET_ROOT \
     --model-id        $SO_BASE_MODEL \
     --beats-checkpoint $SO_ENCODER_CKPT \
-    --beats-repo      $SO_BEATS_REPO \
     --attn-impl sdpa \
     --output-dir ./runs/so7b_continue \
     --epochs 3 --batch-size 2 --grad-accum-steps 3 \
@@ -525,7 +529,6 @@ PYTHONPATH=. torchrun --nproc_per_node=1 train_so_qa.py \
     --max-train-samples 8 --max-valid-samples 4 \
     --batch-size 1 --epochs 1 \
     --beats-checkpoint $SO_ENCODER_CKPT \
-    --beats-repo       $SO_BEATS_REPO \
     --qa-root          $SO_DATASET_ROOT/qa \
     --audio-root       $SO_DATASET_ROOT \
     --attn-impl sdpa \
