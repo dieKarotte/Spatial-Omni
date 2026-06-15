@@ -357,7 +357,7 @@ optimizer + scheduler — use this when starting a fresh schedule on top of
 old weights. Drop the flag to fully resume optimizer/scheduler from a
 crashed run.
 
-### SO-30B (Qwen3-Omni-30B-A3B)
+<!-- ### SO-30B (Qwen3-Omni-30B-A3B)
 
 Requires a Qwen3-Omni transformers build (`environment-so30b.yml`). The
 launcher [`shell/launch_train_so_30b.sh`](shell/launch_train_so_30b.sh)
@@ -370,7 +370,7 @@ torchrun --nproc_per_node=8 train_so_qa_qwen3.py \
     --beats-checkpoint $SO_ENCODER_CKPT \
     --attn-impl sdpa \
     --output-dir ./runs/so30b_stage1
-```
+``` -->
 
 ### IV / Neural-IV baseline
 
@@ -419,8 +419,6 @@ Flags worth knowing:
   `<run-dir>/checkpoints/`.
 - `--checkpoint-paths /path/a.pt /path/b.pt` — explicit list (overrides `--run-dir`).
 - `--checkpoint-glob 'step_0*_trainable.pt'` — sweep step ckpts.
-- `--max-samples 500` — quick smoke / debugging.
-- `--task-names estimate_azimuth detect_source` — filter by task.
 - `--batch-size 1 --num-beams 4 --max-new-tokens 96` — generation knobs.
 
 ### 5.2 Score predictions
