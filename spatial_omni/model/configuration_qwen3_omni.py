@@ -27,11 +27,8 @@ import sys
 # no-op, but keeping the path injection guards against accidental shadowing
 # by another transformers install.
 # ---------------------------------------------------------------------------
-_FORK = os.environ.get(
-    "QWEN3_OMNI_FORK",
-    "${QWEN3_TRANSFORMERS_FORK}",
-)
-if os.path.isdir(_FORK) and _FORK not in sys.path:
+_FORK = os.environ.get("QWEN3_OMNI_FORK", os.environ.get("QWEN3_TRANSFORMERS_FORK", ""))
+if _FORK and os.path.isdir(_FORK) and _FORK not in sys.path:
     sys.path.insert(0, _FORK)
 
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (  # noqa: E402

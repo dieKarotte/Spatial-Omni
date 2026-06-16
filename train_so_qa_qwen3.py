@@ -22,11 +22,8 @@ import sys
 import time
 
 # Inject the local transformers fork so qwen3_omni_moe is importable.
-_FORK = os.environ.get(
-    "QWEN3_OMNI_FORK",
-    "${QWEN3_TRANSFORMERS_FORK}",
-)
-if os.path.isdir(_FORK) and _FORK not in sys.path:
+_FORK = os.environ.get("QWEN3_OMNI_FORK", os.environ.get("QWEN3_TRANSFORMERS_FORK", ""))
+if _FORK and os.path.isdir(_FORK) and _FORK not in sys.path:
     sys.path.insert(0, _FORK)
 
 # Make sure the repo root is importable.
@@ -66,6 +63,61 @@ from spatial_omni.model.modeling_so_thinker_qwen3 import (  # noqa: E402
 from spatial_omni.model.processing_so_qwen3 import (  # noqa: E402
     Qwen3OmniMoeSpatialProcessor,
 )
+
+
+# ---------------------------------------------------------------------------
+# Strip Qwen2.5-Omni–only kwargs from generate(), AND inject eos_token_id so
+# the Qwen3 model actually stops at <|im_end|>.
+#
+# Two distinct issues handled here:
+#
+#  (1) The base trainer calls ``model.generate(..., return_audio=False, ...)``
+#      to disable Qwen2.5-Omni's talker TTS branch. Qwen3-Omni's wrapper has
+#      no talker, so the kwarg is never consumed and
+#      ``GenerationMixin._validate_model_kwargs`` raises:
+#          ValueError: The following `model_kwargs` are not used by the model:
+#              ['return_audio']
+#
+#  (2) Qwen3-Omni's ``generation_config.json`` does **not** set
+#      ``eos_token_id``, and ``thinker_config.eos_token_id`` is ``None``. The
+#      tokenizer's ``eos_token='<|im_end|>'`` (id=151645) is NOT auto-picked
+#      up by HF ``generate()`` — it only looks at the model's generation
+#      config or an explicit kwarg. Without it the model runs to
+#      ``max_new_tokens`` and you see degenerate "from X.Xs to Y.Ys."
+#      repetitions in valid_predictions. The model DID learn to emit
+#      <|im_end|> (the collator appends it to every training answer), it
+#      just never gets a chance to stop there. Force-injecting the kwarg
+#      here fixes both training-time valid_generation and bench inference
+#      with zero retraining cost.
+# ---------------------------------------------------------------------------
+_QWEN3_GENERATE_DROP_KWARGS = ("return_audio", "speaker", "use_audio_in_video")
+_QWEN3_DEFAULT_EOS_TOKEN_IDS = (151645,)  # <|im_end|>
+_orig_qwen3_generate = Qwen3OmniMoeSpatialForConditionalGeneration.generate
+
+
+def _qwen3_generate_with_eos_and_drop(self, *args, **kwargs):
+    for _k in _QWEN3_GENERATE_DROP_KWARGS:
+        kwargs.pop(_k, None)
+    # Inject eos_token_id if the caller didn't already set one. Use a list so
+    # HF's stop criterion handles it as a single-token-id stopping set.
+    if kwargs.get("eos_token_id") is None:
+        # Some generation configs put eos_token_id in self.generation_config;
+        # if that's already set, prefer the model's own value.
+        gen_cfg = getattr(self, "generation_config", None)
+        cfg_eos = getattr(gen_cfg, "eos_token_id", None) if gen_cfg is not None else None
+        if cfg_eos is None:
+            kwargs["eos_token_id"] = list(_QWEN3_DEFAULT_EOS_TOKEN_IDS)
+    # Same for pad_token_id (HF will warn / fall back when batched generation
+    # has padding but no pad id; Qwen3 tokenizer has pad="<|endoftext|>"=151643).
+    if kwargs.get("pad_token_id") is None:
+        gen_cfg = getattr(self, "generation_config", None)
+        cfg_pad = getattr(gen_cfg, "pad_token_id", None) if gen_cfg is not None else None
+        if cfg_pad is None:
+            kwargs["pad_token_id"] = 151643  # <|endoftext|>
+    return _orig_qwen3_generate(self, *args, **kwargs)
+
+
+Qwen3OmniMoeSpatialForConditionalGeneration.generate = _qwen3_generate_with_eos_and_drop
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +258,18 @@ def _build_model_qwen3(args, processor):
                 f"[build_model_qwen3] removed accelerate hooks and pinned "
                 f"so_encoder + projector to {target_dev}"
             )
+
+    # DDP mode: move entire model to local GPU. ``from_pretrained`` loads to
+    # CPU when ``low_cpu_mem_usage=True`` is set without a device_map; DDP
+    # later wraps with device_ids=[local_rank] which requires the params to
+    # already live on that device. (The base trainer's build_model does this
+    # via ``model.to(args.device)``; the Qwen3 monkey-patched replacement
+    # must mirror that branch.)
+    if device_map is None:
+        model.to(args.device)
+        _trainer.rank0_print(
+            f"[build_model_qwen3] DDP mode: moved model to {args.device}"
+        )
 
     return model
 

@@ -17,6 +17,15 @@ Differences vs the Qwen2.5 Spatial Thinker:
   ``feature_attention_mask + input_features``-only Qwen2.5 conventions. We
   pass through unchanged.
 - Talker is ignored entirely; we wrap the Thinker only.
+- ``prepare_inputs_for_generation`` MUST be overridden so that
+  ``generate()`` forwards spatial_audio / spatial_tokens / spatial_*_lengths
+  through to ``forward()``. Upstream's signature does not list these
+  kwargs, so without an override they get swallowed by ``**kwargs`` and
+  the spatial signal is silently dropped at inference time, while
+  training-time ``forward()`` (called directly, not via ``generate()``)
+  remains unaffected. This is the bug that caused azimuth/elevation/
+  detect_time to collapse to ~chance levels in early Qwen3 benches even
+  though valid_loss decreased normally during training.
 """
 
 from __future__ import annotations
@@ -30,11 +39,8 @@ import torch
 # ---------------------------------------------------------------------------
 # Bootstrap fork import path.
 # ---------------------------------------------------------------------------
-_FORK = os.environ.get(
-    "QWEN3_OMNI_FORK",
-    "${QWEN3_TRANSFORMERS_FORK}",
-)
-if os.path.isdir(_FORK) and _FORK not in sys.path:
+_FORK = os.environ.get("QWEN3_OMNI_FORK", os.environ.get("QWEN3_TRANSFORMERS_FORK", ""))
+if _FORK and os.path.isdir(_FORK) and _FORK not in sys.path:
     sys.path.insert(0, _FORK)
 
 from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (  # noqa: E402
@@ -227,6 +233,125 @@ class Qwen3OmniMoeSpatialThinkerForConditionalGeneration(
         # also be passed (for audio token id lookup in get_placeholder_mask).
         # Keep input_ids in kwargs/args.
         return super().forward(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # generate() bridge — forward spatial inputs through to forward()
+    # ------------------------------------------------------------------
+    # CRITICAL: without this override, upstream
+    # Qwen3OmniMoeThinkerForConditionalGeneration.prepare_inputs_for_generation
+    # does not know about spatial_audio / spatial_tokens / spatial_*_lengths.
+    # Those kwargs reach generate() via collator's gen_* fields, get swallowed
+    # by **kwargs in upstream's signature, and never make it back into
+    # model_inputs — so our forward() receives spatial_audio=None, sees
+    # _has_spatial_inputs == False, and short-circuits straight to
+    # super().forward() with NO spatial signal injected. The trained model is
+    # forced to answer azimuth/elevation/detect_time questions using only the
+    # 16 kHz mono mel — i.e. random.
+    #
+    # The fix mirrors the Qwen2.5 reference (modeling_so_thinker.py):
+    #   - During prefill (no past_key_values, or cache_position == 0): keep
+    #     all spatial-related tensors so forward() can run the encoder +
+    #     projector + masked_scatter exactly once on the prompt.
+    #   - During decode (past_key_values is active and prepared seq len <= 1):
+    #     clear spatial tensors so we don't recompute the encoder each token.
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        cache_position=None,
+        position_ids=None,
+        use_cache=True,
+        pixel_values=None,
+        pixel_values_videos=None,
+        image_grid_thw=None,
+        video_grid_thw=None,
+        input_features=None,
+        feature_attention_mask=None,
+        spatial_audio=None,
+        spatial_audio_attention_mask=None,
+        spatial_audio_lengths=None,
+        spatial_tokens=None,
+        spatial_token_lengths=None,
+        # ``projected_spatial_tokens`` is accepted for forward-compat with
+        # collators that ship the LLM-side projected embeddings directly. The
+        # Qwen3 forward() below does not currently consume it (only
+        # spatial_audio / spatial_tokens), but we forward it anyway so future
+        # extensions don't need yet another generate-path patch.
+        projected_spatial_tokens=None,
+        use_audio_in_video=False,
+        video_second_per_grid=None,
+        is_first_iteration=False,
+        **kwargs,
+    ):
+        model_inputs = super().prepare_inputs_for_generation(
+            input_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            cache_position=cache_position,
+            position_ids=position_ids,
+            use_cache=use_cache,
+            pixel_values=pixel_values,
+            pixel_values_videos=pixel_values_videos,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            input_features=input_features,
+            feature_attention_mask=feature_attention_mask,
+            use_audio_in_video=use_audio_in_video,
+            video_second_per_grid=video_second_per_grid,
+            is_first_iteration=is_first_iteration,
+            **kwargs,
+        )
+
+        # Splice spatial inputs back into model_inputs for forward().
+        model_inputs["spatial_audio"] = spatial_audio
+        model_inputs["spatial_audio_attention_mask"] = spatial_audio_attention_mask
+        model_inputs["spatial_audio_lengths"] = spatial_audio_lengths
+        model_inputs["spatial_tokens"] = spatial_tokens
+        model_inputs["spatial_token_lengths"] = spatial_token_lengths
+        model_inputs["projected_spatial_tokens"] = projected_spatial_tokens
+
+        # Detect decode step. Two complementary signals:
+        #   (a) Upstream's own decode-step detection: when use_cache is on and
+        #       this is NOT the first iteration, upstream itself zeroes
+        #       input_features (line 2306-2309 of upstream
+        #       modeling_qwen3_omni_moe.py). We mirror that signal for spatial.
+        #   (b) Defensive seq-len check: if prepared input_ids has length <= 1
+        #       (autoregressive single-step) AND a cache exists AND no
+        #       inputs_embeds were provided directly, treat as decode.
+        # Either signal suffices — we want maximally aggressive clearing during
+        # decode so the encoder is not invoked on every new token.
+        prepared_input_ids = model_inputs.get("input_ids")
+        prepared_inputs_embeds = model_inputs.get("inputs_embeds")
+        prepared_seq_len = None
+        if (
+            prepared_input_ids is not None
+            and hasattr(prepared_input_ids, "shape")
+            and prepared_input_ids.ndim >= 2
+        ):
+            prepared_seq_len = int(prepared_input_ids.shape[1])
+
+        is_decode_by_upstream = (not is_first_iteration) and bool(use_cache)
+        is_decode_by_seqlen = bool(
+            past_key_values is not None
+            and prepared_seq_len is not None
+            and prepared_seq_len <= 1
+            and prepared_inputs_embeds is None
+        )
+
+        if is_decode_by_upstream or is_decode_by_seqlen:
+            for key in (
+                "spatial_audio",
+                "spatial_audio_attention_mask",
+                "spatial_audio_lengths",
+                "spatial_tokens",
+                "spatial_token_lengths",
+                "projected_spatial_tokens",
+            ):
+                model_inputs[key] = None
+        return model_inputs
 
     # ------------------------------------------------------------------
     # helpers (mostly identical to Qwen2.5 spatial impl, BEATs-only)

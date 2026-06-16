@@ -24,11 +24,8 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 # Inject the local transformers fork so qwen3_omni_moe is importable.
-_FORK = os.environ.get(
-    "QWEN3_OMNI_FORK",
-    "${QWEN3_TRANSFORMERS_FORK}",
-)
-if os.path.isdir(_FORK) and _FORK not in sys.path:
+_FORK = os.environ.get("QWEN3_OMNI_FORK", os.environ.get("QWEN3_TRANSFORMERS_FORK", ""))
+if _FORK and os.path.isdir(_FORK) and _FORK not in sys.path:
     sys.path.insert(0, _FORK)
 
 # Apply the same monkey-patches the Qwen3 trainer wrapper uses.

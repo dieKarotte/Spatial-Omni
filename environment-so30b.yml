@@ -1,42 +1,61 @@
-# Conda environment for SO-30B (Qwen3-Omni + SO-Encoder) DDP training on H20.
+# ============================================================================
+# Conda environment for Spatial-Omni (SO-30B): SO-Encoder + Qwen3-Omni-MoE.
 #
-# The machine may report "CUDA Version: 12.9" in nvidia-smi. That is the driver
-# capability, not a requirement that the PyTorch wheel must be cu129. The cu128
-# wheel is the stable target here and runs on a 12.9-capable driver.
+# This is a SEPARATE environment from the SO-7B `environment.yml`. The two CANNOT
+# share one env: SO-7B is pinned to transformers==4.52.0 (Qwen2.5-Omni), while
+# SO-30B needs transformers>=4.57.0, which is the first release that ships the
+# `qwen3_omni_moe` model code (Qwen3-Omni-MoE, Sept 2025).
 #
-# After creating the env, install the local Qwen3 transformers fork with:
-#   conda activate so-30b
-#   cd /path/to/transformers && pip install -e .
-# Then launch with QWEN3_OMNI_FORK=/path/to/transformers/src.
-name: so-30b
+# Tested target: Python 3.11, CUDA 12.4, recent PyTorch on NVIDIA A100/H100.
+#
+# Create & activate:
+#   conda env create -f environment-so30b.yml
+#   conda activate spatial-omni-30b
+#
+# Optional custom transformers fork:
+#   If you maintain a local transformers source tree with qwen3_omni_moe (e.g.
+#   a dev build), point the Qwen3 entrypoints at it without touching this env:
+#       export QWEN3_TRANSFORMERS_FORK=/path/to/transformers/src
+#   When unset, the pip-installed transformers (>=4.57.0) is used directly.
+#
+# The 30B-A3B model is large (MoE, ~30B params). Use either DDP across GPUs or
+# `--device-map auto` for accelerate sharding (see README §SO-30B).
+# ============================================================================
+name: spatial-omni-30b
 channels:
   - conda-forge
 dependencies:
-  - python=3.10
-  - pip>=25
+  - python=3.11
+  - pip>=24
   - setuptools
   - wheel
   - git
   - ffmpeg
   - libsndfile
   - pip:
-      - --index-url https://download.pytorch.org/whl/cu128
+      # PyTorch CUDA 12.4 wheels
+      - --index-url https://download.pytorch.org/whl/cu124
       - --extra-index-url https://pypi.org/simple
-      - torch==2.9.0
-      - torchaudio==2.9.0
-      - accelerate>=1.8.0
-      - peft>=0.18.0
-      - huggingface-hub>=1.3.0,<2.0
-      - hf-transfer>=0.1.9
-      - tokenizers>=0.22.0,<0.23.0
-      - safetensors>=0.4.5
-      - soundfile>=0.12.1
-      - librosa>=0.10.2
-      - scipy>=1.11.0
-      - numpy>=1.26.0,<3.0.0
-      - tqdm>=4.66.0
-      - tensorboard>=2.14.0
-      - einops>=0.7.0
-      - packaging>=24.0
-      - psutil>=5.9.0
-      - ipython>=8.0.0
+      - torch==2.6.0
+      - torchaudio==2.6.0
+      # Transformers stack — 4.57.0 is the first release with qwen3_omni_moe.
+      - transformers==4.57.0
+      - tokenizers>=0.21,<0.23
+      - peft==0.17.1
+      - accelerate==1.10.1
+      - safetensors==0.6.2
+      - huggingface-hub>=0.34.4
+      # Audio I/O & signal processing
+      - soundfile==0.13.1
+      - librosa==0.11.0
+      - scipy==1.15.3
+      - numpy==1.24.4
+      # SO-Encoder (vendored BEATs)
+      - einops==0.6.1
+      # Tokenizer / config backends
+      - sentencepiece==0.1.99
+      - protobuf==5.29.5
+      - pyyaml==6.0.2
+      # Training utilities
+      - tqdm==4.67.1
+      - tensorboard==2.20.0

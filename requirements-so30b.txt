@@ -1,0 +1,63 @@
+# ============================================================================
+# Spatial-Omni (SO-30B) — pip requirements
+#
+# SEPARATE from requirements.txt (SO-7B). Do NOT install both into one env:
+#   - SO-7B  needs transformers==4.52.0 (Qwen2.5-Omni)
+#   - SO-30B needs transformers>=4.57.0, the first release shipping the
+#     `qwen3_omni_moe` model code (Qwen3-Omni-MoE, Sept 2025).
+#
+# Prefer the conda recipe in `environment-so30b.yml` (see README §SO-30B) for a
+# one-command setup with the correct CUDA build of PyTorch.
+#
+# Optional custom transformers fork:
+#   export QWEN3_TRANSFORMERS_FORK=/path/to/transformers/src
+#   (When unset, the pip-installed transformers below is used.)
+# ============================================================================
+
+# --- Core deep learning (CUDA 12.4 builds) ---
+# Install via the PyTorch CUDA index, e.g.:
+#   pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0
+torchaudio==2.6.0
+
+# --- Transformers stack (Qwen3-Omni-MoE base + LoRA) ---
+transformers==4.57.0
+tokenizers>=0.21,<0.23
+peft==0.17.1
+accelerate==1.10.1
+safetensors==0.6.2
+huggingface-hub>=0.34.4
+
+# --- Audio I/O & signal processing ---
+soundfile==0.13.1
+librosa==0.11.0
+scipy==1.15.3
+numpy==1.24.4
+
+# --- SO-Encoder (vendored BEATs) ---
+einops==0.6.1
+
+# --- Tokenizer / config backends pulled in by transformers ---
+sentencepiece==0.1.99
+protobuf==5.29.5
+pyyaml==6.0.2
+
+# --- Training utilities ---
+tqdm==4.67.1
+tensorboard==2.20.0
+
+# ----------------------------------------------------------------------------
+# Optional extras (uncomment as needed)
+# ----------------------------------------------------------------------------
+# Flash-Attention 2 — the Qwen3 build path requests it by default in the sanity/
+# probe scripts; the trainer resolves --attn-impl auto -> sdpa when fa2 is
+# absent, so it runs without it. Install only if you want fa2:
+#   pip install flash-attn==2.8.3 --no-build-isolation
+# flash-attn==2.8.3
+
+# DeepSpeed — ZeRO sharding for very large multi-GPU runs.
+# deepspeed==0.17.5
+
+# OpenAI client — only for the optional LLM-judge mode of
+# scripts/score_test_predictions.py.
+# openai==1.107.1

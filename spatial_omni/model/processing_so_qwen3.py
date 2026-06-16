@@ -30,11 +30,8 @@ import torch
 # ---------------------------------------------------------------------------
 # Bootstrap fork import path.
 # ---------------------------------------------------------------------------
-_FORK = os.environ.get(
-    "QWEN3_OMNI_FORK",
-    "${QWEN3_TRANSFORMERS_FORK}",
-)
-if os.path.isdir(_FORK) and _FORK not in sys.path:
+_FORK = os.environ.get("QWEN3_OMNI_FORK", os.environ.get("QWEN3_TRANSFORMERS_FORK", ""))
+if _FORK and os.path.isdir(_FORK) and _FORK not in sys.path:
     sys.path.insert(0, _FORK)
 
 from transformers.feature_extraction_utils import BatchFeature  # noqa: E402
