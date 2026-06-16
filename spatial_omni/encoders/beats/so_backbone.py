@@ -5,6 +5,7 @@ boundaries first. The internal logic is left as TODOs so the architecture can
 be reviewed before implementation begins.
 """
 
+import os
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Dict, Optional, Tuple
@@ -1891,6 +1892,23 @@ class SOBackbone(nn.Module):
                 Whether to require strict matching on the trunk-compatible keys.
         """
         is_main_process = (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
+        # The BEATs trunk checkpoint only provides *initial* weights for the
+        # encoder trunk. When a complete SO-Encoder checkpoint is loaded
+        # afterwards (e.g. during eval/inference via bench_so_encoder.py), it
+        # overwrites every parameter loaded here, so a missing/empty trunk path
+        # is not fatal in that scenario. Skip gracefully instead of crashing so
+        # that evaluating a self-contained checkpoint requires no external
+        # trunk download.
+        if not checkpoint_path or not os.path.exists(checkpoint_path):
+            if is_main_process:
+                tqdm.write(
+                    f"[SOBackbone] BEATs trunk checkpoint not found "
+                    f"(path={checkpoint_path!r}); skipping trunk init. This is "
+                    f"expected when loading a complete SO-Encoder checkpoint, "
+                    f"which overwrites these weights. Provide --pretrained-beats-ckpt "
+                    f"only when initializing from the raw BEATs trunk for pretraining."
+                )
+            return
         if is_main_process:
             tqdm.write(f"[SOBackbone] Loading BEATs checkpoint from {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=True)

@@ -3,23 +3,19 @@
 
 Recent multimodal large language models mainly process audio as monaural signals, thereby discarding the spatial cues contained in spatial audio for sound localization, spatial relation reasoning, and spatial scene understanding. We propose Spatial-Omni, a lightweight method that implements SO-Encoder to inject First-Order Ambisonics (FOA) spatial audio into existing Omni LLMs as an independent modality, without modifying their original audio encoders. SO-Encoder provides spatial tokens with limited additional context cost and improves spatial audio understanding through efficient staged training. To support training and evaluation, we construct SO-Dataset, SO-QA, and SO-Bench from open-source data, real recordings, and simulations, containing 400K FOA spatial audio clips and 2.1M spatial question answering pairs. SO-Bench covers 16 spatial audio understanding subtasks, including basic detection and location estimation, spatial relation understanding, and complex spatial reasoning. Experiments show that Spatial-Omni outperforms existing open-source Large Audio-Language Models (LALMs) and Omni LLM models on spatial audio understanding tasks while retaining a reasonable level of general audio understanding.
 
-**Spatial audio understanding on top of Qwen-Omni.** Spatial-Omni augments
-Qwen2.5-Omni / Qwen3-Omni LLMs with a dedicated spatial encoder (**SO-Encoder**)
-that turns first-order ambisonic (FOA) audio into low-rate spatial tokens, and
-injects them into the LLM via a `<|spatial|>` placeholder. Two model sizes ship
-out of the box:
+**Spatial audio understanding on top of Qwen2.5-Omni.** Spatial-Omni augments
+the Qwen2.5-Omni-7B LLM with a dedicated spatial encoder (**SO-Encoder**) that
+turns first-order ambisonic (FOA) audio into low-rate spatial tokens, and
+injects them into the LLM via a `<|spatial|>` placeholder.
 
-| Variant | Base LLM             | Spatial encoder | Trainer                       |
-|---------|----------------------|-----------------|-------------------------------|
-| SO-7B   | Qwen2.5-Omni-7B      | SO-Encoder      | `train_so_qa.py`              |
-| SO-30B  | Qwen3-Omni-30B-A3B   | SO-Encoder      | `train_so_qa_qwen3.py`        |
+| Variant | Base LLM        | Spatial encoder | Trainer          |
+|---------|-----------------|-----------------|------------------|
+| SO-7B   | Qwen2.5-Omni-7B | SO-Encoder      | `train_so_qa.py` |
 
-Three spatial-encoder backbones are available:
-
-- **SO-Encoder (BEATs-based, recommended)** — Spatial-pretrained BEATs
-  encoder, projected to 2.5 Hz spatial tokens.
-- **SELD path** — DCASE 2024 SELD baseline backbone + adapter.
-- **IV / Neural-IV** — Lightweight intensity-vector baseline.
+The SO-Encoder is a BEATs-based, spatially-pretrained encoder that emits
+2.5 Hz spatial tokens. (Two baselines also ship for comparison — a DCASE 2024
+SELD backbone and a lightweight intensity-vector path — but the SO-Encoder
+pipeline below is the main, recommended route.)
 
 The two evaluation assets are:
 
@@ -28,35 +24,45 @@ The two evaluation assets are:
 
 ### Contents
 
-1. [Environment](#1-environment) — pip / conda install + env vars
+1. [Environment](#1-environment) — conda install + env vars
 2. [Data: SO-Dataset / SO-Bench](#2-data-so-dataset--so-bench) — download, extract, schema
 3. [SO-Encoder pretraining & evaluation](#3-so-encoder-pretraining--evaluation) — `train_so_pretrain` + `bench_so_encoder`
-4. [SO-7B QA fine-tuning (3 stages)](#4-so-7b-qa-fine-tuning-3-stages) — `train_so_qa` + SO-30B / IV / SELD variants
+4. [SO-7B QA fine-tuning (3 stages)](#4-so-7b-qa-fine-tuning-3-stages) — `train_so_qa`
 5. [Inference & evaluation on SO-Bench](#5-inference--evaluation-on-so-bench) — `bench_test_generate` + `score_test_predictions`
 6. [Repository layout](#6-repository-layout)
 7. [Citations](#7-citations)
 8. [License](#8-license)
 
+> **SO-30B (Qwen3-Omni-MoE) variant** lives on the `so-30b` branch
+> with its own environment (`environment-so30b.yml`) and trainer
+> (`train_so_qa_qwen3.py`). Check out that branch for the full SO-30B guide.
+
 ---
 
 ## 1. Environment
 
-### Option A — pip (SO-7B path)
-```bash
-git clone https://example.com/spatial-omni.git
-cd Spatial-Omni
-python3.10 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-# optional: pip install flash-attn deepspeed
-```
+Tested target: **Python 3.11, CUDA 12.4, PyTorch 2.5.1** on NVIDIA A100.
 
-### Option B — conda (SO-30B path, needs Qwen3 transformers fork)
+### Install with conda (recommended)
 ```bash
-conda env create -f environment-so30b.yml
+conda env create -f environment.yml
 conda activate spatial-omni
 ```
 
-PyTorch ≥ 2.4, transformers = 4.52.0 (or 5.0.0.dev0 fork for SO-30B), peft ≥ 0.10.
+This pins every dependency to the exact versions the repo is developed and
+tested against (`transformers==4.52.0`, `peft==0.17.1`, `torch==2.5.1+cu124`,
+etc.). `nvidia-smi` may report a higher CUDA version — that is the driver
+capability; the cu124 wheels run on any driver that is 12.4-capable or newer.
+
+### Install with pip (alternative)
+```bash
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
+pip install -r requirements.txt
+```
+
+> The trainers default to `--attn-impl sdpa`, so **flash-attn is not required**.
+> To enable it for extra speed: `pip install flash-attn==2.8.3 --no-build-isolation`.
 
 ### External dependencies (set once via env vars)
 
@@ -65,7 +71,7 @@ so you do **not** need to clone `microsoft/unilm`. Only the trunk weights
 file is needed, and only for SO-Encoder pretraining.
 
 ```bash
-# 1) HuggingFace base model (REQUIRED for SO-7B / SO-30B QA fine-tune & bench)
+# 1) HuggingFace base model (REQUIRED for QA fine-tune & bench)
 huggingface-cli download Qwen/Qwen2.5-Omni-7B --local-dir ./Qwen2.5-Omni-7B
 export SO_BASE_MODEL=$PWD/Qwen2.5-Omni-7B
 
@@ -357,41 +363,6 @@ optimizer + scheduler — use this when starting a fresh schedule on top of
 old weights. Drop the flag to fully resume optimizer/scheduler from a
 crashed run.
 
-<!-- ### SO-30B (Qwen3-Omni-30B-A3B)
-
-Requires a Qwen3-Omni transformers build (`environment-so30b.yml`). The
-launcher [`shell/launch_train_so_30b.sh`](shell/launch_train_so_30b.sh)
-handles the schedule:
-```bash
-torchrun --nproc_per_node=8 train_so_qa_qwen3.py \
-    --projector-only \
-    --qa-root    $SO_DATASET_ROOT/qa \
-    --audio-root $SO_DATASET_ROOT \
-    --beats-checkpoint $SO_ENCODER_CKPT \
-    --attn-impl sdpa \
-    --output-dir ./runs/so30b_stage1
-``` -->
-
-### IV / Neural-IV baseline
-
-```bash
-torchrun --nproc_per_node=4 train_iv_qa.py \
-    --spatial-encoder-type iv \
-    --projector-only \
-    --qa-root    $SO_DATASET_ROOT/qa \
-    --audio-root $SO_DATASET_ROOT \
-    --attn-impl sdpa \
-    --output-dir ./runs/iv_stage1
-```
-Bundled launcher: [`shell/launch_train_iv.sh`](shell/launch_train_iv.sh).
-Switch to Neural-IV with `--spatial-encoder-type neural_iv`.
-
-### SELD baseline
-
-DCASE 2024 SELD baseline + adapter, bundled launcher:
-[`shell/launch_train_seld.sh`](shell/launch_train_seld.sh) (driver:
-`scripts/train_seld_qa.py`).
-
 ---
 
 ## 5. Inference & evaluation on SO-Bench
@@ -457,7 +428,7 @@ Runs `bench_test_generate.py` + `score_test_predictions.py` for every
 checkpoint under `<run-dir>/checkpoints/`, writing one `metrics.json` per
 ckpt.
 
-### 5.4 Unified driver across baselines
+### 5.4 Unified driver
 
 ```bash
 torchrun --nproc_per_node=4 scripts/run_bench.py \
@@ -466,9 +437,10 @@ torchrun --nproc_per_node=4 scripts/run_bench.py \
     --qa-root  $SO_DATASET_ROOT/qa --audio-root $SO_DATASET_ROOT \
     --split    test
 ```
-Supported `--baseline` values: `so-7b`, `so-30b`, `zero-spatial`,
-`zero-spatial-30b`, `iv`, `neural-iv`. The driver dispatches to the
-appropriate sub-script based on the baseline.
+`scripts/run_bench.py` is a thin dispatcher that sets up DDP once and calls
+the right generation sub-script. For the SO-7B SO-Encoder pipeline use
+`--baseline so-7b`; `--baseline zero-spatial` runs the same backbone with the
+spatial input zeroed out (diagnostic).
 
 <!-- ### 5.5 Diagnostic ablations
 
@@ -500,31 +472,42 @@ don't overwrite the joint baseline. -->
 ```
 Spatial-Omni/
 ├── README.md, LICENSE, .gitignore
-├── requirements.txt, environment-so30b.yml
-├── train_so_qa.py            # SO-7B trainer (3-stage)
-├── train_so_qa_qwen3.py      # SO-30B trainer
-├── train_iv_qa.py            # IV / Neural-IV baseline
+├── requirements.txt, environment.yml
+├── train_so_qa.py            # SO-7B trainer (3-stage) — the main entry point
 ├── spatial_omni/             # Python package
-│   ├── model/                # Qwen2.5/Qwen3-Omni + Spatial-Thinker subclass
-│   ├── modules/              # SO-Encoder, projectors, SELD adapter, IV adapter
-│   ├── encoders/beats/       # BEATs (microsoft/unilm) + Spatial-Omni extension
-│   ├── encoders/seldnet/     # DCASE 2024 SELD baseline (third-party)
-│   ├── data/, utils/, ufb_banding/
+│   ├── model/                # Qwen2.5-Omni + Spatial-Thinker subclass
+│   ├── modules/              # SO-Encoder, projectors (+ SELD/IV adapters)
+│   ├── encoders/beats/       # vendored BEATs + SO-Encoder extension
+│   ├── encoders/seldnet/     # vendored DCASE 2024 SELD baseline
+│   ├── data/, utils/
 ├── scripts/
-│   ├── data/                 # SO-Dataset extraction, manifest building, vocab
+│   ├── data/                 # SO-Dataset extraction, manifest building, vocab,
+│   │                         #   release_so_encoder_ckpt.py (ckpt scrubber)
 │   ├── bench_so_encoder.py   # SO-Encoder eval
 │   ├── bench_test_generate.py / batch_bench_so_qa.py / run_bench.py
 │   ├── score_test_predictions.py
-│   ├── precompute_*.py       # optional feature caches
-│   └── train_seld_qa.py
+│   └── precompute_*.py       # optional feature caches
 ├── shell/                    # ready-to-run launcher recipes
-│   ├── launch_train_so_7b.sh / launch_train_so_30b.sh
-│   ├── launch_train_iv.sh / launch_train_seld.sh
-│   ├── launch_bench_test.sh / bench_easy.sh
-│   └── train_with_autorestart.sh / resume_iv.sh
+│   ├── launch_train_so_7b.sh # 3-stage SO-7B training
+│   └── launch_bench_test.sh  # test-split bench
 ├── configs/                  # DeepSpeed config(s)
 └── tests/                    # integration smoke tests
 ```
+
+> **SO-30B (Qwen3-Omni-MoE)** — on the `so-30b` branch only:
+> `train_so_qa_qwen3.py` (wrapper trainer), `requirements-so30b.txt` /
+> `environment-so30b.yml` (separate env), `configs/ds_zero3_so30b.json`, and
+> under `spatial_omni/model/`: `configuration_qwen3_omni.py`,
+> `modeling_so_thinker_qwen3.py`, `processing_so_qwen3.py`. Launchers:
+> `shell/launch_train_so_30b.sh`, `shell/launch_train_so_30b_h20_ddp.sh`,
+> `shell/launch_train_so_30b_curriculum.sh`. Bench/diagnostics:
+> `scripts/bench_test_generate_qwen3.py`,
+> `scripts/sanity_check_so_qwen3_generate.py`,
+> `scripts/probe_valid_loss_so_qwen3.py`.
+
+> The repo also ships optional comparison baselines (`train_iv_qa.py`,
+> `scripts/train_seld_qa.py` and their launchers) that reuse the same data
+> pipeline. They are not part of the SO-7B route documented above.
 
 ---
 

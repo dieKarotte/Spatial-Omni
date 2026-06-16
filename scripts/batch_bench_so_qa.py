@@ -137,11 +137,29 @@ def resolve_checkpoint_paths(args: argparse.Namespace) -> List[str]:
 
 
 def infer_train_args_path(checkpoint_path: str) -> str:
-    run_dir = os.path.dirname(os.path.dirname(os.path.abspath(checkpoint_path)))
-    path = os.path.join(run_dir, "train_args.json")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"train_args.json not found for checkpoint: {checkpoint_path}")
-    return path
+    """Locate the train_args.json that describes how to rebuild the model.
+
+    Two layouts are supported:
+      1. Training run layout — ``<run>/checkpoints/<ckpt>.pt`` with
+         ``<run>/train_args.json`` two levels up (how the trainer writes it).
+      2. Flat release layout — ``<dir>/<ckpt>.pt`` with ``<dir>/train_args.json``
+         sitting right next to the checkpoint (convenient for distributing a
+         single checkpoint file).
+    """
+    abs_ckpt = os.path.abspath(checkpoint_path)
+    candidates = [
+        # Layout 1: <run>/train_args.json (ckpt under <run>/checkpoints/)
+        os.path.join(os.path.dirname(os.path.dirname(abs_ckpt)), "train_args.json"),
+        # Layout 2: train_args.json next to the checkpoint
+        os.path.join(os.path.dirname(abs_ckpt), "train_args.json"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError(
+        "train_args.json not found for checkpoint "
+        f"{checkpoint_path}. Looked in: {candidates}"
+    )
 
 
 def build_eval_model_args(runtime_args: argparse.Namespace, train_args: Dict[str, Any]) -> argparse.Namespace:

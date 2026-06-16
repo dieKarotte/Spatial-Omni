@@ -1,0 +1,52 @@
+# ============================================================================
+# Conda environment for Spatial-Omni (SO-7B): SO-Encoder + Qwen2.5-Omni-7B.
+#
+# Tested target: Python 3.11, CUDA 12.4, PyTorch 2.5.1 on NVIDIA A100.
+# nvidia-smi may report a higher "CUDA Version" (the driver capability); the
+# cu124 wheels below run on any driver that is 12.4-capable or newer.
+#
+# Create & activate:
+#   conda env create -f environment.yml
+#   conda activate spatial-omni
+#
+# The trainers default to `--attn-impl sdpa`, so flash-attn is NOT required.
+# To enable it later:  pip install flash-attn==2.8.3 --no-build-isolation
+# ============================================================================
+name: spatial-omni
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip>=24
+  - setuptools
+  - wheel
+  - git
+  - ffmpeg
+  - libsndfile
+  - pip:
+      # PyTorch CUDA 12.4 wheels
+      - --index-url https://download.pytorch.org/whl/cu124
+      - --extra-index-url https://pypi.org/simple
+      - torch==2.5.1
+      - torchaudio==2.5.1
+      # Transformers stack (Qwen2.5-Omni base + LoRA)
+      - transformers==4.52.0
+      - tokenizers==0.21.4
+      - peft==0.17.1
+      - accelerate==1.10.1
+      - safetensors==0.6.2
+      - huggingface-hub==0.34.4
+      # Audio I/O & signal processing
+      - soundfile==0.13.1
+      - librosa==0.11.0
+      - scipy==1.15.3
+      - numpy==1.24.4
+      # SO-Encoder (vendored BEATs)
+      - einops==0.6.1
+      # Tokenizer / config backends
+      - sentencepiece==0.1.99
+      - protobuf==5.29.5
+      - pyyaml==6.0.2
+      # Training utilities
+      - tqdm==4.67.1
+      - tensorboard==2.20.0

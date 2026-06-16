@@ -30,6 +30,11 @@ except ImportError:
 
 DEFAULT_LEGACY_REPO = None  # No longer needed; spatial_omni package is used directly
 DEFAULT_MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
+# Repo root (…/Spatial-Omni) and the vendored DCASE SELD baseline shipped inside
+# the package. The vendored copy provides parameters.py + the SELD model defs so
+# the SELD path needs no external DCASE checkout.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VENDORED_SELDNET_REPO = os.path.join(REPO_ROOT, "spatial_omni", "encoders", "seldnet")
 DEFAULT_QA_DATASET_ROOT = (
     "${DCASE_BASELINE_REPO}/"
     "prepared_datasets/starss23_foa_plus_29cls_20s"
@@ -41,13 +46,11 @@ DEFAULT_QA_VERSION = "default"
 QA_VERSION_TO_SUBDIR = {
     "default": "qa_pairs",
 }
-DEFAULT_SELD233_CKPT = (
-    "${DCASE_BASELINE_REPO}/"
-    "3_1_dev_split0_multiaccdoa_foa_model.h5"
+DEFAULT_SELD233_CKPT = os.environ.get(
+    "SELD233_CKPT",
+    "${DCASE_BASELINE_REPO}/3_1_dev_split0_multiaccdoa_foa_model.h5",
 )
-DEFAULT_SELD233_STATS_DIR = (
-    "${SELD_FEATURE_STATS_DIR}"
-)
+DEFAULT_SELD233_STATS_DIR = os.environ.get("SELD_FEATURE_STATS_DIR", "")
 DEFAULT_OUTPUT_DIR = (
     "${DCASE_BASELINE_REPO}/"
     "spatial_qa_runs/default_run"
@@ -138,7 +141,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--baseline-repo-path",
         type=str,
-        default="${DCASE_BASELINE_REPO}",
+        default=os.environ.get("DCASE_BASELINE_REPO", VENDORED_SELDNET_REPO),
+        help="DCASE SELD baseline repo root (provides parameters.py). "
+             "Defaults to the vendored copy under spatial_omni/encoders/seldnet.",
     )
     parser.add_argument("--seld-task-id", type=str, default="233")
     parser.add_argument("--seld-checkpoint-path", type=str, default=DEFAULT_SELD233_CKPT)

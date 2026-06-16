@@ -30,6 +30,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+# Vendored DCASE SELD baseline (provides parameters.py). Used as the default so
+# the SELD branch needs no external DCASE checkout.
+VENDORED_SELDNET_REPO = os.path.join(REPO_ROOT, "spatial_omni", "encoders", "seldnet")
+
 from spatial_omni.model.configuration import Qwen2_5OmniConfig
 from spatial_omni.model.modeling_so_thinker import Qwen2_5OmniSpatialForConditionalGeneration
 from spatial_omni.modules.seld_backbone import SeldBackbone
@@ -57,19 +61,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--baseline-repo-path",
         type=str,
-        default="${DCASE_BASELINE_REPO}",
-        help="Path to the DCASE baseline repo used by task 233.",
+        default=os.environ.get("DCASE_BASELINE_REPO", VENDORED_SELDNET_REPO),
+        help="Path to the DCASE baseline repo used by task 233. Defaults to the "
+             "vendored copy under spatial_omni/encoders/seldnet.",
     )
     parser.add_argument(
         "--seld-checkpoint-path",
         type=str,
-        default="${DCASE_BASELINE_REPO}/3_1_dev_split0_multiaccdoa_foa_model.h5",
+        default=os.environ.get(
+            "SELD233_CKPT",
+            "${DCASE_BASELINE_REPO}/3_1_dev_split0_multiaccdoa_foa_model.h5",
+        ),
         help="Checkpoint used by the SELD233 spatial backbone.",
     )
     parser.add_argument(
         "--seld-feature-stats-dir",
         type=str,
-        default="${SELD_FEATURE_STATS_DIR}",
+        default=os.environ.get("SELD_FEATURE_STATS_DIR", ""),
         help="Directory containing `foa_wts`.",
     )
     parser.add_argument(
