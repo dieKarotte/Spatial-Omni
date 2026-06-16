@@ -376,9 +376,9 @@ crashed run.
 
 ### Separate environment (required)
 
-SO-30B needs `transformers>=4.57.0` (the first release shipping the
-`qwen3_omni_moe` model code), which is **incompatible** with SO-7B's pinned
-`transformers==4.52.0`. Use a dedicated env — it does not affect the SO-7B env:
+SO-30B needs a transformers that ships the `qwen3_omni_moe` model code, which is
+**incompatible** with SO-7B's pinned `transformers==4.52.0`. Use a dedicated env
+— it does not affect the SO-7B env:
 
 ```bash
 conda env create -f environment-so30b.yml
@@ -386,14 +386,54 @@ conda activate spatial-omni-30b
 # (or: pip install -r requirements-so30b.txt into a fresh venv)
 ```
 
-If you maintain a custom transformers source tree with `qwen3_omni_moe` (e.g. a
-dev build), point the Qwen3 entrypoints at it without changing the env:
+The pins mirror the env SO-30B was actually trained/benched in: **python 3.12,
+torch 2.9.0+cu128, transformers 5.0.0, peft 0.18.1, deepspeed 0.19.0,
+flash-attn 2.8.3 (optional), CUDA 12.8 runtime.** `qwen3_omni_moe` first appeared
+in a transformers 5.0.0 dev fork and then in the 5.0.0 release.
+
+If your platform only has an older transformers (or you maintain a custom
+source tree with `qwen3_omni_moe`), point the Qwen3 entrypoints at it without
+changing the env:
 
 ```bash
 export QWEN3_TRANSFORMERS_FORK=/path/to/transformers/src
 ```
 
-When unset, the pip-installed `transformers` is used directly.
+All Qwen3 entrypoints honor `QWEN3_OMNI_FORK` first, then
+`QWEN3_TRANSFORMERS_FORK`; when both are unset, the pip-installed `transformers`
+is used directly.
+
+> **Why the trainer parses `config.json` by hand and builds the processor from
+> parts.** Two upstream quirks are worked around in `train_so_qa_qwen3.py`:
+> (1) top-level `Qwen3OmniMoeConfig.from_pretrained(model)` can crash on the
+> talker sub-config, so we read `config.json` raw and instantiate the *thinker*
+> config directly (we never need the talker); (2) `AutoProcessor` /
+> `Qwen3OmniMoeProcessor.from_pretrained` can fail on the video-processor path
+> (needs torchvision, unused for audio QA), so we assemble the processor from
+> `AutoTokenizer` + `AutoFeatureExtractor`. Both are handled for you.
+
+### Memory & parallelism (30B-A3B)
+
+30B-A3B is a MoE (~30B params, **≈60 GB BF16**, 128 experts / top-8, hidden=2048,
+48 layers). Pick the parallelism that fits your GPUs:
+
+| GPUs | Strategy | How |
+|---|---|---|
+| ≥80 GB/card (e.g. H20 95 GB) | **DDP**, one full replica per GPU (fastest) | `shell/launch_train_so_30b_h20_ddp.sh`, or `torchrun … train_so_qa_qwen3.py` |
+| 40 GB/card (e.g. A100 40 GB) | **accelerate sharding**, one sharded replica across all GPUs | `--device-map auto` |
+| 40 GB/card, with optimizer state | **DeepSpeed ZeRO-3** + CPU offload | `configs/ds_zero3_so30b.json` (see note below) |
+
+- LoRA targets attention `{q,k,v,o}_proj` only — expert MLPs (`SparseMoeBlock`)
+  are **not** touched. The Qwen3 wrapper makes `model.thinker == model`, so the
+  LoRA prefix is `model.layers` (not `thinker.model` like SO-7B).
+- MoE **router aux loss is disabled** during fine-tuning
+  (`router_aux_loss_coef=0.0`, `output_router_logits=False`) — with only the
+  attention path LoRA'd and experts frozen, the load-balancing aux term would
+  just pollute the LM loss.
+- **DeepSpeed status:** `configs/ds_zero3_so30b.json` is provided as an asset,
+  but `train_so_qa_qwen3.py` does not yet call `deepspeed.initialize` — wiring
+  ZeRO-3 into the trainer is a TODO. Until then, use DDP (big cards) or
+  `--device-map auto` (small cards).
 
 ### Required checkpoints / paths
 
@@ -407,11 +447,27 @@ When unset, the pip-installed `transformers` is used directly.
 
 The flags are identical to SO-7B (`--projector-only` → `--encoder-lora` →
 `--beats-lora`); just swap the entrypoint to `train_so_qa_qwen3.py` and the
-`--model-id` to the Qwen3 base. The MoE is large, so pick one of:
+`--model-id` to the Qwen3 base.
 
-- **DDP** (`torchrun --nproc_per_node=N`, one full model replica per GPU), or
-- **accelerate sharding** for a single replica across GPUs via `--device-map auto`
-  (set on the wrapper, which strips it before the inner parser sees it).
+**Bundled launchers** (3-stage, all env-overridable):
+
+| Script | Use |
+|---|---|
+| `shell/launch_train_so_30b.sh` | generic 3-stage; DDP by default, or `DEVICE_MAP=auto` for sharding |
+| `shell/launch_train_so_30b_h20_ddp.sh` | thin wrapper for ≥80 GB cards: forces DDP, `flash_attention_2`, per-stage batch sizes, widened NCCL timeout |
+| `shell/launch_train_so_30b_curriculum.sh` | easy → medium → hard curriculum (each phase continues stage-3 from the previous phase's best, with a lower LR) |
+
+```bash
+# Curriculum across three difficulty QA roots (you supply the paths):
+GPUS=0,1,2,3,4,5,6,7 \
+MODEL_ID=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+SO_ENCODER_CKPT=/path/to/so_encoder/best.pt \
+EASY_QA=/path/to/qa_easy MEDIUM_QA=/path/to/qa_medium HARD_QA=/path/to/qa_hard \
+RUN_ROOT_BASE=./runs/so30b_curriculum \
+  bash shell/launch_train_so_30b_curriculum.sh
+```
+
+Or run the trainer directly:
 
 ```bash
 # Stage 3 example — unfreeze SO-Encoder + LoRA + projector (DDP across 8 GPUs)
@@ -429,8 +485,14 @@ torchrun --nproc_per_node=8 train_so_qa_qwen3.py \
     --lr 1e-5 --lora-lr 3e-5 --projector-lr 1e-6 --beats-lr 1e-6 \
     --lora-r 16 --lora-alpha 32 \
     --lora-target-modules q_proj k_proj v_proj o_proj \
+    --lora-target-prefixes model.layers \
     --encoder-token-rate 10.0 --projector-shuffle-factor 4
 ```
+
+> `--attn-impl`: use `flash_attention_2` if flash-attn is installed (the
+> big-card env above includes it), else `sdpa`. `--lora-target-prefixes
+> model.layers` is required on Qwen3 (the wrapper exposes the thinker as the
+> top-level model, so there is no `thinker.` prefix).
 
 To shard one replica across GPUs instead of DDP, drop `torchrun` and pass
 `--device-map auto`:
@@ -634,9 +696,11 @@ Spatial-Omni/
 
 > **SO-30B (Qwen3-Omni-MoE)** — on the `feat/so-30b-qwen3` branch only (see §4b):
 > `train_so_qa_qwen3.py` (wrapper trainer), `requirements-so30b.txt` /
-> `environment-so30b.yml` (separate env), and under `spatial_omni/model/`:
-> `configuration_qwen3_omni.py`, `modeling_so_thinker_qwen3.py`,
-> `processing_so_qwen3.py`. Bench/diagnostics:
+> `environment-so30b.yml` (separate env), `configs/ds_zero3_so30b.json`, and
+> under `spatial_omni/model/`: `configuration_qwen3_omni.py`,
+> `modeling_so_thinker_qwen3.py`, `processing_so_qwen3.py`. Launchers:
+> `shell/launch_train_so_30b.sh`, `shell/launch_train_so_30b_h20_ddp.sh`,
+> `shell/launch_train_so_30b_curriculum.sh`. Bench/diagnostics:
 > `scripts/bench_test_generate_qwen3.py`,
 > `scripts/sanity_check_so_qwen3_generate.py`,
 > `scripts/probe_valid_loss_so_qwen3.py`.

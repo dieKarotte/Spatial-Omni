@@ -164,49 +164,8 @@ class Qwen2_5OmniAudioEncoderConfig(PretrainedConfig):
         output_dim (`int`, *optional*, defaults to 3584):
             The output dimention of AudioEncoder.
         spatial_encoder_type (`str`, *optional*):
-            legacy spatial-encoder type. Supported: "foa_conv3d", "foa_hybrid_cnn".
-        spatial_channels (`int`, *optional*, defaults to 16):
-            legacy spatial feature channel count (e.g., PowerVector channels).
-        spatial_frontend_type (`str`, *optional*):
-            legacy spatial frontend type (e.g., "power_vector").
-        spatial_frontend_trainable (`bool`, *optional*, defaults to True):
-            If True, compute spatial features inside the model for end-to-end training.
-        spatial_require_ufb (`bool`, *optional*, defaults to True):
-            If True, require UFB/SPATPY spatial frontend; raise if unavailable.
-        spatial_smoothing_trainable (`bool`, *optional*, defaults to True):
-            If True, enable learnable one-pole smoothing in the spatial frontend.
-        spatial_band_params (`dict`, *optional*):
-            Banding parameters for the spatial frontend (dt_ms, nband, shape, fmin/fmax, etc.).
-        spatial_patch_size (`Tuple[int, int]`, *optional*, defaults to `(16, 16)`):
-            Patch size for optional patch embedding stage (band, M^2).
-        spatial_conv3d_mode (`str`, *optional*, defaults to `"paper"`):
-            Conv3D layout mode for legacy spatial:
-              - `"backup"`: matches BACKUP logic (C=spatial_channels as channel, D=1).
-              - `"paper"`: matches LaTeX volume (C_in=1, M^2 as W axis).
-        spatial_conv3d_pool_kernel (`Tuple[int, int, int]` or `int`, *optional*):
-            MaxPool3d kernel size for removed Conv3D blocks. If int, expanded to 3-tuple.
-        spatial_conv3d_pool_stride (`Tuple[int, int, int]` or `int`, *optional*):
-            MaxPool3d stride for removed Conv3D blocks. If `None`, uses `kernel_size` (PyTorch default).
-        spatial_conv3d_pool_padding (`Tuple[int, int, int]` or `int`, *optional*):
-            MaxPool3d padding for removed Conv3D blocks. If `None`, uses 0.
-        spatial_transformer_layers (`int`, *optional*, defaults to 0):
-            Number of transformer layers in the legacy spatial adaptation stage.
-        spatial_transformer_hidden_dim (`int`, *optional*, defaults to 768):
-            Hidden size for removed transformer layers (if enabled).
-        spatial_transformer_heads (`int`, *optional*):
-            Attention heads for removed transformer layers (if enabled).
-        spatial_projection_hidden_dim (`int`, *optional*):
-            Hidden size for removed projection MLP (if enabled).
-        spatial_use_seld_head (`bool`, *optional*, defaults to False):
-            Whether to enable SELD auxiliary head during training.
-        spatial_seld_loss_weight (`float`, *optional*, defaults to 1.0):
-            Weight for SELD auxiliary loss when labels are provided.
-        spatial_seld_num_tracks (`int`, *optional*, defaults to 3):
-            Number of ACCDOA tracks for overlap (track-wise ACCDOA).
-        spatial_seld_num_events (`int`, *optional*):
-            Number of SELD event classes (if SELD head enabled).
-        spatial_seld_num_doa_bins (`int`, *optional*):
-            Deprecated for track-wise ACCDOA; kept for backward compatibility.
+            Spatial-encoder backbone selector. Supported: "so_backbone"
+            (SO-Encoder), "seld" (SELD baseline), "iv" / "neural_iv" (IV baselines).
 
     Example:
 
@@ -242,29 +201,6 @@ class Qwen2_5OmniAudioEncoderConfig(PretrainedConfig):
         n_window=100,
         output_dim=3584,
         spatial_encoder_type: Optional[str] = None,
-        spatial_channels: int = 16,
-        # --- legacy spatial extensions (scaffold) ---
-        spatial_frontend_type: Optional[str] = None,
-        spatial_frontend_trainable: bool = True,
-        spatial_require_ufb: bool = True,
-        spatial_smoothing_trainable: bool = True,
-        spatial_band_params: Optional[Dict[str, Any]] = None,
-        spatial_feature_clamp: Optional[float] = 30.0,
-        spatial_projected_feature_clamp: Optional[float] = 20.0,
-        spatial_patch_size: Optional[Tuple[int, int]] = (16, 16),
-        spatial_conv3d_mode: str = "paper",
-        spatial_conv3d_pool_kernel: Optional[Tuple[int, int, int]] = (1, 2, 1),
-        spatial_conv3d_pool_stride: Optional[Tuple[int, int, int]] = (1, 2, 1),
-        spatial_conv3d_pool_padding: Optional[Tuple[int, int, int]] = (0, 0, 0),
-        spatial_transformer_layers: int = 4,
-        spatial_transformer_hidden_dim: Optional[int] = 768,
-        spatial_transformer_heads: Optional[int] = None,
-        spatial_projection_hidden_dim: Optional[int] = None,
-        spatial_use_seld_head: bool = False,
-        spatial_seld_loss_weight: float = 1.0,
-        spatial_seld_num_tracks: int = 3,
-        spatial_seld_num_events: Optional[int] = None,
-        spatial_seld_num_doa_bins: Optional[int] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -285,29 +221,6 @@ class Qwen2_5OmniAudioEncoderConfig(PretrainedConfig):
         self.n_window = n_window
         self.output_dim = output_dim
         self.spatial_encoder_type = spatial_encoder_type
-        self.spatial_channels = spatial_channels
-        # --- legacy spatial extensions (scaffold) ---
-        self.spatial_frontend_type = spatial_frontend_type
-        self.spatial_frontend_trainable = spatial_frontend_trainable
-        self.spatial_require_ufb = spatial_require_ufb
-        self.spatial_smoothing_trainable = spatial_smoothing_trainable
-        self.spatial_band_params = spatial_band_params
-        self.spatial_feature_clamp = spatial_feature_clamp
-        self.spatial_projected_feature_clamp = spatial_projected_feature_clamp
-        self.spatial_patch_size = spatial_patch_size
-        self.spatial_conv3d_mode = spatial_conv3d_mode
-        self.spatial_conv3d_pool_kernel = spatial_conv3d_pool_kernel
-        self.spatial_conv3d_pool_stride = spatial_conv3d_pool_stride
-        self.spatial_conv3d_pool_padding = spatial_conv3d_pool_padding
-        self.spatial_transformer_layers = spatial_transformer_layers
-        self.spatial_transformer_hidden_dim = spatial_transformer_hidden_dim
-        self.spatial_transformer_heads = spatial_transformer_heads
-        self.spatial_projection_hidden_dim = spatial_projection_hidden_dim
-        self.spatial_use_seld_head = spatial_use_seld_head
-        self.spatial_seld_loss_weight = spatial_seld_loss_weight
-        self.spatial_seld_num_tracks = spatial_seld_num_tracks
-        self.spatial_seld_num_events = spatial_seld_num_events
-        self.spatial_seld_num_doa_bins = spatial_seld_num_doa_bins
 
 
 class Qwen2_5OmniTextConfig(PretrainedConfig):

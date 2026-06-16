@@ -956,8 +956,8 @@ def build_model(args, processor):
     tc = cfg.thinker_config; tc.loss_type = "ForCausalLMLoss"
     # Switch to Spatial-BEATs encoder
     tc.spatial_encoder_type = "so_backbone"
-    tc.so_backbone_checkpoint_path = os.path.abspath(args.beats_checkpoint)
-    tc.so_backbone_repo_path = os.path.abspath(args.beats_repo)
+    tc.so_backbone_checkpoint_path = os.path.abspath(args.beats_checkpoint) if args.beats_checkpoint else ""
+    tc.so_backbone_repo_path = os.path.abspath(args.beats_repo) if args.beats_repo else ""
     tc.so_encoder_dim = 768
     tc.so_projector_hidden_dim = 768
     # Apply projector variant + shuffle factor; LLM-side rate is
@@ -1305,11 +1305,48 @@ def save_artifacts(model, processor, opt, sched, args, epoch, step, metrics, tag
         fd = os.path.join(cd, f"{tag}_full")
         unwrap_model(model).save_pretrained(fd); processor.save_pretrained(fd)
 
+def align_peft_prefix(state_dict, model):
+    """Reconcile the PEFT ``base_model.model.`` prefix between a saved
+    checkpoint and the current model.
+
+    Stage 1 (``projector_only``) is *not* PEFT-wrapped, so it saves bare keys
+    like ``thinker.so_projector.*``. Stages 2/3 apply ``get_peft_model`` first,
+    so the live model expects ``base_model.model.thinker.so_projector.*``.
+    Loading a stage-1 checkpoint into a stage-2/3 model with ``strict=False``
+    would otherwise drop every projector tensor into ``unexpected_keys`` and
+    silently discard the stage-1 projector warm-up.
+
+    This normaliser inspects the *current* model's parameter names and rewrites
+    each checkpoint key by adding or stripping the ``base_model.model.`` prefix
+    so it matches. Keys that already match are left untouched.
+    """
+    target_keys = set(dict(unwrap_model(model).named_parameters()).keys())
+    if not target_keys:
+        return state_dict
+    PREFIX = "base_model.model."
+    out = {}
+    for k, v in state_dict.items():
+        if k in target_keys:
+            out[k] = v
+            continue
+        # Try adding the prefix (stage1 ckpt -> stage2/3 PEFT model).
+        if (PREFIX + k) in target_keys:
+            out[PREFIX + k] = v
+            continue
+        # Try stripping the prefix (PEFT ckpt -> non-PEFT model).
+        if k.startswith(PREFIX) and k[len(PREFIX):] in target_keys:
+            out[k[len(PREFIX):]] = v
+            continue
+        out[k] = v  # leave as-is; will surface in missing/unexpected if wrong
+    return out
+
+
 def resume_training_state(model, opt, sched, path, model_only, device):
     from spatial_omni.utils.ckpt_compat import remap_legacy_state_dict
     ckpt = torch.load(path, map_location="cpu")
     sd = ckpt.get("trainable_state_dict", ckpt)
     sd = remap_legacy_state_dict(sd)
+    sd = align_peft_prefix(sd, model)
     res = unwrap_model(model).load_state_dict(sd, strict=False)
     if not model_only:
         os_ = ckpt.get("optimizer")

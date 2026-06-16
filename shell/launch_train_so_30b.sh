@@ -2,11 +2,12 @@
 # 三阶段训练 SO-30B（SO-Encoder + Qwen3-Omni-MoE-30B-A3B）
 # (clone of shell/launch_train_so_7b.sh, adapted for Qwen3)
 #
-# 需要：legacy-qwen3 conda env（包含本地 transformers fork + flash-attn 等）
+# 需要：spatial-omni-30b conda env（transformers w/ qwen3_omni_moe，可选 flash-attn）。
+#       如用自定义 transformers fork，设 QWEN3_TRANSFORMERS_FORK 指向其 src/。
 # 模型：Qwen3-Omni-30B-A3B-Instruct (MoE, 128 experts, top-8, hidden=2048)
 #
 # 显存：30B BF16 ≈ 60GB，单卡 40GB A100 不够；后续 stage3 会接入 DeepSpeed
-# ZeRO-3（见 configs/ds_zero3_qwen3.json）。当前脚本走 torchrun，需要 8 卡 ZeRO-3
+# ZeRO-3（见 configs/ds_zero3_so30b.json）。当前脚本走 torchrun，需要 8 卡 ZeRO-3
 # 或 device_map=auto 才能跑起来。先用 BATCH_SIZE=1 GRAD_ACCUM_STEPS=8 试探。
 #
 # 用法：

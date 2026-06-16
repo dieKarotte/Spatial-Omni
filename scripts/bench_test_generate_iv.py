@@ -84,17 +84,26 @@ def _load_json(path: str) -> Dict[str, Any]:
 
 
 def infer_train_args_path(checkpoint_path: str) -> str:
-    """`<run_dir>/checkpoints/foo_trainable.pt` → `<run_dir>/train_args.json`."""
-    run_dir = os.path.dirname(os.path.dirname(os.path.abspath(checkpoint_path)))
-    path = os.path.join(run_dir, "train_args.json")
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"train_args.json not found for checkpoint: {checkpoint_path} "
-            f"(expected at {path}). The IV training script writes this at "
-            "the start of training; make sure you're pointing at a completed "
-            "run dir, not just a bare checkpoint."
-        )
-    return path
+    """Locate train_args.json for a checkpoint.
+
+    Supports both the training-run layout (``<run>/checkpoints/foo.pt`` with
+    ``<run>/train_args.json`` two levels up) and the flat release layout
+    (``train_args.json`` sitting next to the checkpoint).
+    """
+    abs_ckpt = os.path.abspath(checkpoint_path)
+    candidates = [
+        os.path.join(os.path.dirname(os.path.dirname(abs_ckpt)), "train_args.json"),
+        os.path.join(os.path.dirname(abs_ckpt), "train_args.json"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError(
+        f"train_args.json not found for checkpoint: {checkpoint_path} "
+        f"(looked in {candidates}). The IV training script writes this at the "
+        "start of training; make sure you're pointing at a completed run dir "
+        "or a checkpoint with train_args.json alongside it."
+    )
 
 
 # IV-specific fields we expect in train_args.json. If the user's runs were

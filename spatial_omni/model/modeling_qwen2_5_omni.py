@@ -108,7 +108,6 @@ if is_flash_attn_available():
 
 logger = logging.get_logger(__name__)
 
-# --- START: Paste these classes ---
 
 @dataclass
 class Qwen2_5OmniAudioEncoderOutput(ModelOutput):
@@ -120,81 +119,6 @@ class Qwen2_5OmniAudioEncoderOutput(ModelOutput):
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     spatial_features: Optional[torch.FloatTensor] = None
     seld_logits: Optional[dict] = None
-
-class Conv2DBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
-        super(Conv2DBlock, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size, stride, padding)
-        self.pool = nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1))
-        self.dropout = nn.Dropout(0.2)
-
-    def forward(self, x):
-        x = nn.functional.relu(self.conv1(x))
-        x = nn.functional.relu(self.conv2(x))
-        x = self.dropout(self.pool(x))
-        return x
-
-class Conv3DBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
-        super(Conv3DBlock, self).__init__()
-        self.conv1 = nn.Conv3d(in_channels, out_channels, kernel_size, stride, padding)
-        self.conv2 = nn.Conv3d(out_channels, out_channels, kernel_size, stride, padding)
-        self.pool = nn.MaxPool3d((1, 2, 1))
-        # self.pool = nn.MaxPool3d((1, 2, 2))
-
-    def forward(self, x):
-        x = nn.functional.relu(self.conv1(x))
-        x = nn.functional.relu(self.conv2(x))
-        x = self.pool(x)
-        return x
-
-class SpatialEncoderConv3D(nn.Module):
-    def __init__(self, in_channels):
-        super().__init__()
-        self.conv1 = Conv3DBlock(in_channels, 32, kernel_size=(1, 3, 3), stride=1, padding=(0, 1, 1))
-        self.conv2 = Conv3DBlock(32, 64, kernel_size=(1, 3, 3), stride=1, padding=(0, 1, 1))
-        self.conv3 = Conv3DBlock(64, 128, kernel_size=(1, 3, 3), stride=1, padding=(0, 1, 1))
-        self.conv4 = Conv3DBlock(128, 256, kernel_size=(1, 3, 3), stride=1, padding=(0, 1, 1))
-
-    def forward(self, x):
-        x = x.permute(0, 1, 3, 2).unsqueeze(2)
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.conv4(x)
-        x = x.squeeze(2)
-        x = x.permute(0, 2, 1, 3)
-        x = x.flatten(start_dim=2)
-        return x
-
-class SpatialEncoderHybridCNN(nn.Module):
-    def __init__(self, spatial_channels):
-        super().__init__()
-        self.spec_encoder_blocks = nn.Sequential(
-            Conv2DBlock(1, 32, kernel_size=(3, 3), stride=1, padding=(1, 1)),
-            Conv2DBlock(32, 64, kernel_size=(3, 3), stride=1, padding=(1, 1)),
-            Conv2DBlock(64, 128, kernel_size=(3, 3), stride=1, padding=(1, 1)),
-            Conv2DBlock(128, 256, kernel_size=(3, 3), stride=1, padding=(1, 1)),
-        )
-        self.spatial_encoder = SpatialEncoderConv3D(in_channels=spatial_channels - 1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        spec_feature_map = self.spec_encoder_blocks(x[:, 0, :, :].unsqueeze(1).permute(0, 1, 3, 2))
-        spatial_feature_seq = self.spatial_encoder(x[:, 1:, :, :])
-        spec_feature_seq = spec_feature_map.permute(0, 2, 1, 3).flatten(start_dim=2)
-        
-        if spec_feature_seq.shape[1] != spatial_feature_seq.shape[1]:
-            spatial_feature_seq = spatial_feature_seq.permute(0, 2, 1)
-            spatial_feature_seq = nn.functional.interpolate(
-                spatial_feature_seq, size=spec_feature_seq.shape[1], mode='linear', align_corners=False
-            )
-            spatial_feature_seq = spatial_feature_seq.permute(0, 2, 1)
-
-        combined_seq = torch.cat((spec_feature_seq, spatial_feature_seq), dim=2)
-        return combined_seq
-        
-# --- END: Paste these classes ---
 
 
 class Qwen2RMSNorm(nn.Module):

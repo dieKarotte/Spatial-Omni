@@ -1,33 +1,67 @@
-# Spatial-Omni: Spatial Audio Understanding with LLM
-# Core deep learning
-torch>=2.1.0
-torchaudio>=2.1.0
+# ============================================================================
+# Spatial-Omni (SO-7B) — pip requirements
+#
+# Pinned to the versions this repo is developed & tested against:
+#   Python 3.11, CUDA 12.4, PyTorch 2.5.1
+#
+# For a one-command setup with the correct CUDA build of PyTorch, prefer the
+# conda recipe in `environment.yml` (see README §1). If you install with pip,
+# make sure your CUDA toolkit matches the cu124 wheels below, or adjust the
+# --index-url / version suffix for your platform.
+# ============================================================================
 
-# Transformers (Qwen2.5-Omni base)
-transformers>=4.51.0
-tokenizers>=0.21.0
-accelerate>=0.26.0
+# --- Core deep learning (CUDA 12.4 builds) ---
+# Install these via the PyTorch CUDA index, e.g.:
+#   pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
+torch==2.5.1
+torchaudio==2.5.1
 
-# LoRA fine-tuning
-peft>=0.9.0
+# --- Transformers stack (Qwen2.5-Omni base + LoRA) ---
+transformers==4.52.0
+tokenizers==0.21.4
+peft==0.17.1
+accelerate==1.10.1
+safetensors==0.6.2
+huggingface-hub==0.34.4
 
-# Audio processing
-soundfile>=0.12.0
-librosa>=0.10.0
-numpy>=1.24.0
+# --- Audio I/O & signal processing ---
+soundfile==0.13.1
+librosa==0.11.0
+scipy==1.15.3
+numpy==1.24.4
 
-# Scientific computing
-scipy>=1.10.0
+# --- SO-Encoder (vendored BEATs) ---
+einops==0.6.1
 
-# Training utilities
-tqdm>=4.66.0
-tensorboard>=2.14.0
+# --- Tokenizer / config backends pulled in by transformers ---
+sentencepiece==0.1.99
+protobuf==5.29.5
+pyyaml==6.0.2
 
-# Evaluation / metrics
-IPython>=8.0.0
+# --- Training utilities ---
+tqdm==4.67.1
+tensorboard==2.20.0
 
-# Optional: flash attention (strongly recommended for training speed)
-# flash-attn>=2.3.0
+# ----------------------------------------------------------------------------
+# Optional extras (uncomment as needed)
+# ----------------------------------------------------------------------------
+# Flash-Attention 2 — faster training/inference. The trainers default to
+# `--attn-impl sdpa` and run fine without it; install only if you want fa2.
+#   pip install flash-attn==2.8.3 --no-build-isolation
+# flash-attn==2.8.3
 
-# Optional: DeepSpeed (for multi-GPU training)
-# deepspeed>=0.12.0
+# DeepSpeed — ZeRO sharding for very large multi-GPU runs (not required for SO-7B).
+# deepspeed==0.17.5
+
+# OpenAI client — only for the optional LLM-judge mode of
+# scripts/score_test_predictions.py.
+# openai==1.107.1
+
+# ----------------------------------------------------------------------------
+# SELD baseline path only (scripts/train_seld_qa.py, spatial_omni/encoders/seldnet).
+# Not needed for the SO-7B SO-Encoder pipeline. Uncomment if you use the SELD path.
+# ----------------------------------------------------------------------------
+# scikit-learn==1.2.2
+# matplotlib==3.10.6
+# opencv-python==4.10.0.84
+# pillow==10.4.0

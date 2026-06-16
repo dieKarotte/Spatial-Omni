@@ -3,30 +3,37 @@
 #
 # SEPARATE from requirements.txt (SO-7B). Do NOT install both into one env:
 #   - SO-7B  needs transformers==4.52.0 (Qwen2.5-Omni)
-#   - SO-30B needs transformers>=4.57.0, the first release shipping the
-#     `qwen3_omni_moe` model code (Qwen3-Omni-MoE, Sept 2025).
+#   - SO-30B needs the Qwen3-Omni-MoE model code (`qwen3_omni_moe`)
 #
-# Prefer the conda recipe in `environment-so30b.yml` (see README §SO-30B) for a
+# These pins mirror the environment SO-30B was actually trained/benched in:
+#   python 3.12, torch 2.9.0+cu128, transformers 5.0.0, peft 0.18.1,
+#   deepspeed 0.19.0, flash-attn 2.8.3 (optional). CUDA 12.8 runtime.
+#
+# Prefer the conda recipe in `environment-so30b.yml` (see README §4b) for a
 # one-command setup with the correct CUDA build of PyTorch.
 #
-# Optional custom transformers fork:
+# NOTE on transformers: `qwen3_omni_moe` first appeared in a 5.0.0 dev fork and
+# then in the 5.0.0 release. If your platform only has an older transformers,
+# point QWEN3_TRANSFORMERS_FORK at a local transformers source tree that
+# contains `qwen3_omni_moe`:
 #   export QWEN3_TRANSFORMERS_FORK=/path/to/transformers/src
-#   (When unset, the pip-installed transformers below is used.)
+# (When unset, the pip-installed transformers below is used.)
 # ============================================================================
 
-# --- Core deep learning (CUDA 12.4 builds) ---
+# --- Core deep learning (CUDA 12.8 builds) ---
 # Install via the PyTorch CUDA index, e.g.:
-#   pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-torch==2.6.0
-torchaudio==2.6.0
+#   pip install torch==2.9.0 torchaudio==2.9.0 --index-url https://download.pytorch.org/whl/cu128
+torch==2.9.0
+torchaudio==2.9.0
 
 # --- Transformers stack (Qwen3-Omni-MoE base + LoRA) ---
-transformers==4.57.0
-tokenizers>=0.21,<0.23
-peft==0.17.1
-accelerate==1.10.1
-safetensors==0.6.2
-huggingface-hub>=0.34.4
+transformers==5.0.0
+tokenizers>=0.22,<0.23
+peft==0.18.1
+accelerate==1.13.0
+deepspeed==0.19.0
+safetensors>=0.6.2
+huggingface-hub>=1.3,<2.0
 
 # --- Audio I/O & signal processing ---
 soundfile==0.13.1
@@ -49,14 +56,10 @@ tensorboard==2.20.0
 # ----------------------------------------------------------------------------
 # Optional extras (uncomment as needed)
 # ----------------------------------------------------------------------------
-# Flash-Attention 2 — the Qwen3 build path requests it by default in the sanity/
-# probe scripts; the trainer resolves --attn-impl auto -> sdpa when fa2 is
-# absent, so it runs without it. Install only if you want fa2:
+# Flash-Attention 2 — enables ATTN_IMPL=flash_attention_2 (the H20 DDP launcher
+# requests it by default). The trainer falls back to sdpa if it's absent.
 #   pip install flash-attn==2.8.3 --no-build-isolation
 # flash-attn==2.8.3
-
-# DeepSpeed — ZeRO sharding for very large multi-GPU runs.
-# deepspeed==0.17.5
 
 # OpenAI client — only for the optional LLM-judge mode of
 # scripts/score_test_predictions.py.

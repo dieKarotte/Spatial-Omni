@@ -799,8 +799,8 @@ def build_model(args, processor):
     tc.spatial_iv_max_audio_seconds = float(MAX_AUDIO_SECONDS)
     tc.spatial_neural_iv_hidden_channels = int(args.neural_iv_hidden_channels)
     # Shared FeatureBridge uses the SELD233 config fields.
-    tc.seld_baseline_repo_path = os.path.abspath(args.baseline_repo_path)
-    tc.seld_feature_stats_dir = os.path.abspath(args.seld_feature_stats_dir)
+    tc.seld_baseline_repo_path = os.path.abspath(args.baseline_repo_path) if args.baseline_repo_path else ""
+    tc.seld_feature_stats_dir = os.path.abspath(args.seld_feature_stats_dir) if args.seld_feature_stats_dir else ""
     tc.seld_task_id = "233"
     tc.seld_num_feature_channels = 7
     tc.seld_hop_length = 320  # 2.5Hz target after ratio/downsample

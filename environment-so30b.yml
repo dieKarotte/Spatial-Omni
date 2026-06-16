@@ -3,29 +3,31 @@
 #
 # This is a SEPARATE environment from the SO-7B `environment.yml`. The two CANNOT
 # share one env: SO-7B is pinned to transformers==4.52.0 (Qwen2.5-Omni), while
-# SO-30B needs transformers>=4.57.0, which is the first release that ships the
-# `qwen3_omni_moe` model code (Qwen3-Omni-MoE, Sept 2025).
+# SO-30B needs the Qwen3-Omni-MoE model code (`qwen3_omni_moe`).
 #
-# Tested target: Python 3.11, CUDA 12.4, recent PyTorch on NVIDIA A100/H100.
+# These pins mirror the environment SO-30B was actually trained/benched in:
+#   python 3.12, torch 2.9.0+cu128, transformers 5.0.0, peft 0.18.1,
+#   deepspeed 0.19.0, flash-attn 2.8.3 (optional). CUDA 12.8 runtime.
+#
+# NOTE on transformers: `qwen3_omni_moe` first appeared in a 5.0.0 dev fork and
+# then in the 5.0.0 release. If your platform only has an older transformers,
+# point QWEN3_TRANSFORMERS_FORK at a local transformers source tree that
+# contains `qwen3_omni_moe` (see README §4b).
 #
 # Create & activate:
 #   conda env create -f environment-so30b.yml
 #   conda activate spatial-omni-30b
 #
-# Optional custom transformers fork:
-#   If you maintain a local transformers source tree with qwen3_omni_moe (e.g.
-#   a dev build), point the Qwen3 entrypoints at it without touching this env:
-#       export QWEN3_TRANSFORMERS_FORK=/path/to/transformers/src
-#   When unset, the pip-installed transformers (>=4.57.0) is used directly.
-#
-# The 30B-A3B model is large (MoE, ~30B params). Use either DDP across GPUs or
-# `--device-map auto` for accelerate sharding (see README §SO-30B).
+# 30B-A3B is a large MoE (~30B params, ~60 GB BF16). Train with one of:
+#   - DDP if each GPU can hold the full model (e.g. 80/95 GB cards), or
+#   - `--device-map auto` (accelerate sharding) on smaller cards, or
+#   - DeepSpeed ZeRO-3 (configs/ds_zero3_so30b.json) — see README §4b.
 # ============================================================================
 name: spatial-omni-30b
 channels:
   - conda-forge
 dependencies:
-  - python=3.11
+  - python=3.12
   - pip>=24
   - setuptools
   - wheel
@@ -33,18 +35,19 @@ dependencies:
   - ffmpeg
   - libsndfile
   - pip:
-      # PyTorch CUDA 12.4 wheels
-      - --index-url https://download.pytorch.org/whl/cu124
+      # PyTorch CUDA 12.8 wheels (cu128 runtime; needs a 12.8-capable driver).
+      - --index-url https://download.pytorch.org/whl/cu128
       - --extra-index-url https://pypi.org/simple
-      - torch==2.6.0
-      - torchaudio==2.6.0
-      # Transformers stack — 4.57.0 is the first release with qwen3_omni_moe.
-      - transformers==4.57.0
-      - tokenizers>=0.21,<0.23
-      - peft==0.17.1
-      - accelerate==1.10.1
-      - safetensors==0.6.2
-      - huggingface-hub>=0.34.4
+      - torch==2.9.0
+      - torchaudio==2.9.0
+      # Transformers stack with Qwen3-Omni-MoE support.
+      - transformers==5.0.0
+      - tokenizers>=0.22,<0.23
+      - peft==0.18.1
+      - accelerate==1.13.0
+      - deepspeed==0.19.0
+      - safetensors>=0.6.2
+      - huggingface-hub>=1.3,<2.0
       # Audio I/O & signal processing
       - soundfile==0.13.1
       - librosa==0.11.0
@@ -59,3 +62,6 @@ dependencies:
       # Training utilities
       - tqdm==4.67.1
       - tensorboard==2.20.0
+      # Optional: flash-attention 2 (enables ATTN_IMPL=flash_attention_2; the
+      # trainer falls back to sdpa if absent). Build can take a while:
+      # - flash-attn==2.8.3
