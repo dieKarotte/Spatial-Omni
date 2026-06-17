@@ -276,7 +276,13 @@ class SeldBackbone(nn.Module):
         except ImportError:
             pass
         # Fall back to loading from an external SELD baseline checkout
-        # (legacy path; required pre-vendoring).
+        # (legacy path; required pre-vendoring). Loaded directly from the file
+        # path so it never mutates sys.path.
+        if not self.baseline_repo_path:
+            raise ImportError(
+                f"Could not import vendored seldnet.{module_basename} and no "
+                f"external baseline_repo_path is set to load {file_name}."
+            )
         module_path = os.path.join(self.baseline_repo_path, file_name)
         spec = importlib.util.spec_from_file_location(module_name, module_path)
         if spec is None or spec.loader is None:

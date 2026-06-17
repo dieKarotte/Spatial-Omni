@@ -4,13 +4,14 @@
 Recent multimodal large language models mainly process audio as monaural signals, thereby discarding the spatial cues contained in spatial audio for sound localization, spatial relation reasoning, and spatial scene understanding. We propose Spatial-Omni, a lightweight method that implements SO-Encoder to inject First-Order Ambisonics (FOA) spatial audio into existing Omni LLMs as an independent modality, without modifying their original audio encoders. SO-Encoder provides spatial tokens with limited additional context cost and improves spatial audio understanding through efficient staged training. To support training and evaluation, we construct SO-Dataset, SO-QA, and SO-Bench from open-source data, real recordings, and simulations, containing 400K FOA spatial audio clips and 2.1M spatial question answering pairs. SO-Bench covers 16 spatial audio understanding subtasks, including basic detection and location estimation, spatial relation understanding, and complex spatial reasoning. Experiments show that Spatial-Omni outperforms existing open-source Large Audio-Language Models (LALMs) and Omni LLM models on spatial audio understanding tasks while retaining a reasonable level of general audio understanding.
 
 **Spatial audio understanding on top of Qwen2.5-Omni.** Spatial-Omni augments
-the Qwen2.5-Omni-7B LLM with a dedicated spatial encoder (**SO-Encoder**) that
+the Qwen2.5-Omni LLM with a dedicated spatial encoder (**SO-Encoder**) that
 turns first-order ambisonic (FOA) audio into low-rate spatial tokens, and
 injects them into the LLM via a `<|spatial|>` placeholder.
 
 | Variant | Base LLM        | Spatial encoder | Trainer          |
 |---------|-----------------|-----------------|------------------|
 | SO-7B   | Qwen2.5-Omni-7B | SO-Encoder      | `train_so_qa.py` |
+| SO-30B  | Qwen3-Omni-a30b-Instruct | SO-Encoder      | `train_so_qa_qwen3.py` |
 
 The SO-Encoder is a BEATs-based, spatially-pretrained encoder that emits
 2.5 Hz spatial tokens. (Two baselines also ship for comparison — a DCASE 2024

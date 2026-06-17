@@ -86,6 +86,20 @@ def parse_args() -> argparse.Namespace:
         help="Multiple QA directories to concatenate for joint training/validation. Overrides --qa-root and --qa-version.",
     )
     parser.add_argument(
+        "--audio-root",
+        type=str,
+        default=None,
+        help="Optional root prepended to relative audio_path values in the QA "
+             "jsonl (matches the SO-Dataset release layout where audio_path is "
+             "e.g. 'audio/train/foo.wav'). Absolute audio_path values are used as-is.",
+    )
+    parser.add_argument(
+        "--audio-roots",
+        nargs="+",
+        default=None,
+        help="Multiple candidate audio roots, tried in order for relative audio_path. Overrides --audio-root.",
+    )
+    parser.add_argument(
         "--qa-version",
         type=str,
         default=DEFAULT_QA_VERSION,
@@ -240,11 +254,24 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     args.qa_roots = resolve_qa_roots(args.qa_roots, args.qa_root, args.qa_version)
     args.qa_root = args.qa_roots[0]
+    # Normalize audio roots: --audio-roots overrides --audio-root; both optional.
+    if args.audio_roots:
+        args.audio_roots = [os.path.abspath(r) for r in args.audio_roots]
+    elif args.audio_root:
+        args.audio_roots = [os.path.abspath(args.audio_root)]
+    else:
+        args.audio_roots = []
     args.freeze_spatial_only = args.train_mode == "spatial_only"
     return args
 
 
 def add_legacy_repo_to_path(legacy_repo_path: str) -> None:
+    # Guard against None/empty: inserting None into sys.path poisons later import
+    # machinery (importlib find_spec / os.stat(None) -> TypeError). The vendored
+    # spatial_omni.encoders.seldnet package is used directly, so this is normally
+    # a no-op unless an explicit external legacy repo is requested.
+    if not legacy_repo_path:
+        return
     if legacy_repo_path not in sys.path:
         sys.path.insert(0, legacy_repo_path)
 
@@ -455,22 +482,38 @@ class QAAudioJsonlDataset(Dataset):
         max_samples: Optional[int] = None,
         feature_cache_manifest_path: Optional[str] = None,
         hidden_cache_manifest_path: Optional[str] = None,
+        audio_roots: Optional[List[str]] = None,
     ) -> None:
         self.records: List[Dict[str, Any]] = []
         feature_cache_manifest = load_tensor_cache_manifest(feature_cache_manifest_path)
         hidden_cache_manifest = load_hidden_cache_manifest(hidden_cache_manifest_path)
         raw_records = load_qa_records(jsonl_path, max_samples=max_samples)
+        qa_dir = os.path.dirname(os.path.abspath(jsonl_path))
         for record_index, record in enumerate(raw_records):
             audio_path = record.get("audio_path")
+            # Schema compat: the SO-Dataset release uses `question`; older SELD
+            # QA used `prompt`. Accept either, normalizing to `prompt` so the
+            # collator (which reads `prompt`) works for both.
             prompt = record.get("prompt")
+            if prompt is None:
+                prompt = record.get("question")
+                if prompt is not None:
+                    record["prompt"] = prompt
             answer = record.get("answer")
-            if not audio_path or not os.path.exists(audio_path):
+            # Resolve audio_path: absolute as-is; relative against --audio-root(s),
+            # then the QA dir and its parent (release layout puts audio/ beside qa/).
+            resolved = self._resolve_audio_path(audio_path, audio_roots, qa_dir)
+            if resolved is None:
                 raise FileNotFoundError(
-                    f"Missing audio_path for record {record_index} in {jsonl_path}: {audio_path}"
+                    f"Missing audio_path for record {record_index} in {jsonl_path}: "
+                    f"{audio_path!r} (searched audio_roots={audio_roots}, qa_dir={qa_dir})"
                 )
+            record["audio_path"] = resolved
+            audio_path = resolved
             if prompt is None or answer is None:
                 raise ValueError(
-                    f"Each record must contain prompt and answer. Broken record {record_index} in {jsonl_path}"
+                    f"Each record must contain prompt/question and answer. "
+                    f"Broken record {record_index} in {jsonl_path}"
                 )
             resolved_audio_path = os.path.abspath(audio_path)
             if feature_cache_manifest is not None:
@@ -489,6 +532,26 @@ class QAAudioJsonlDataset(Dataset):
                 record["seld_hidden_cache_path"] = cache_path
             self.records.append(record)
 
+    @staticmethod
+    def _resolve_audio_path(
+        audio_path: Optional[str],
+        audio_roots: Optional[List[str]],
+        qa_dir: str,
+    ) -> Optional[str]:
+        if not audio_path:
+            return None
+        if os.path.isabs(audio_path):
+            return audio_path if os.path.exists(audio_path) else None
+        candidates: List[str] = []
+        for root in (audio_roots or []):
+            candidates.append(os.path.join(root, audio_path))
+        candidates.append(os.path.join(qa_dir, audio_path))
+        candidates.append(os.path.join(os.path.dirname(qa_dir), audio_path))
+        for cand in candidates:
+            if os.path.exists(cand):
+                return os.path.abspath(cand)
+        return None
+
     def __len__(self) -> int:
         return len(self.records)
 
@@ -502,6 +565,7 @@ def build_qa_dataset(
     max_samples: Optional[int],
     feature_cache_manifest_path: Optional[str],
     hidden_cache_manifest_path: Optional[str],
+    audio_roots: Optional[List[str]] = None,
 ) -> Tuple[Dataset, List[str], List[int]]:
     split_paths: List[str] = []
     datasets: List[Dataset] = []
@@ -514,6 +578,7 @@ def build_qa_dataset(
             max_samples=max_samples,
             feature_cache_manifest_path=feature_cache_manifest_path,
             hidden_cache_manifest_path=hidden_cache_manifest_path,
+            audio_roots=audio_roots,
         )
         split_paths.append(split_path)
         datasets.append(dataset)
@@ -922,12 +987,32 @@ def infer_feature_to_seld_ratio(task_params: Dict[str, Any]) -> int:
 
 
 def load_seld_task_params(baseline_repo_path: str, task_id: str) -> Dict[str, Any]:
+    # Prefer the vendored copy as a *proper package* import. This avoids polluting
+    # sys.path[0] with a directory full of bare modules (parameters.py, etc.),
+    # which would otherwise sit ahead of site-packages for the rest of the process
+    # and corrupt later importlib.find_spec/metadata lookups (e.g. transformers'
+    # flash_attn detection crashing on an os.stat(None) during a runtime lazy import).
+    try:
+        from spatial_omni.encoders.seldnet import parameters as _params
+        return _params.get_params(str(task_id))
+    except ImportError:
+        pass
+    # External baseline checkout: insert on sys.path only long enough to import,
+    # then remove it so the search path is left clean.
     baseline_repo_abs = os.path.abspath(baseline_repo_path)
+    inserted = False
     if baseline_repo_abs not in sys.path:
         sys.path.insert(0, baseline_repo_abs)
-    import parameters
-
-    return parameters.get_params(str(task_id))
+        inserted = True
+    try:
+        import parameters
+        return parameters.get_params(str(task_id))
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(baseline_repo_abs)
+            except ValueError:
+                pass
 
 
 def build_model(args: argparse.Namespace, processor):
@@ -1666,6 +1751,7 @@ def main() -> None:
         args.max_train_samples,
         args.seld_feature_cache_manifest,
         args.seld_hidden_cache_manifest,
+        audio_roots=args.audio_roots,
     )
     valid_dataset, valid_paths, valid_sizes = build_qa_dataset(
         args.qa_roots,
@@ -1673,6 +1759,7 @@ def main() -> None:
         args.max_valid_samples,
         args.seld_feature_cache_manifest,
         args.seld_hidden_cache_manifest,
+        audio_roots=args.audio_roots,
     )
     train_sampler = DistributedSampler(train_dataset, shuffle=True) if args.distributed else None
     train_loader = make_loader(

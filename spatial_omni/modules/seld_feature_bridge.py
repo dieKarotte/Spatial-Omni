@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import importlib.util
 import os
+import warnings
 from typing import Optional
 
 import torch
@@ -379,7 +380,29 @@ class SeldFeatureBridge(nn.Module):
 
         sample_rate = int(params.get("fs", sample_rate)) if params is not None else int(sample_rate)
         max_audio_seconds = float(max_audio_seconds)
-        num_mel_bins = int(params.get("nb_mel_bins", num_mel_bins)) if params is not None else int(num_mel_bins)
+        # Mel bins: the *explicitly requested* value (CLI --iv-num-mel-bins /
+        # config) wins, because it must match the normalization scaler (foa_wts)
+        # dimensionality (num_feature_channels x num_mel_bins). Baseline
+        # parameters.py only fills mel when no explicit value applies. Warn
+        # loudly on mismatch so a silent 64-vs-128 fallback can't quietly break
+        # the scaler dimension.
+        requested_mel = int(num_mel_bins)
+        if params is not None and "nb_mel_bins" in params:
+            baseline_mel = int(params["nb_mel_bins"])
+            if baseline_mel != requested_mel:
+                warnings.warn(
+                    f"[SeldFeatureBridge] num_mel_bins mismatch: requested "
+                    f"{requested_mel} (e.g. --iv-num-mel-bins) but baseline "
+                    f"parameters.py (task_id={self.task_id}) defines "
+                    f"nb_mel_bins={baseline_mel}. Using the requested value "
+                    f"({requested_mel}); ensure your normalization stats "
+                    f"(foa_wts) were computed at {int(num_feature_channels)}ch x "
+                    f"{requested_mel}mel. To use the baseline mel instead, pass "
+                    f"--iv-num-mel-bins {baseline_mel}.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        num_mel_bins = requested_mel
         hop_length = int(params.get("hop_len", hop_length)) if params is not None else int(hop_length)
         win_length = int(params.get("win_len", 2 * hop_length)) if params is not None else int(2 * hop_length)
         n_fft = int(params.get("n_fft", self._next_greater_power_of_2(win_length))) if params is not None else int(self._next_greater_power_of_2(win_length))
