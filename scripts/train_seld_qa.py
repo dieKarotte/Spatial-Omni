@@ -153,6 +153,16 @@ def parse_args() -> argparse.Namespace:
         choices=("float32", "bfloat16", "float16"),
     )
     parser.add_argument(
+        "--attn-impl",
+        type=str,
+        default="sdpa",
+        choices=("auto", "flash_attention_2", "sdpa", "eager"),
+        help="Attention implementation. Default 'sdpa' is REQUIRED for training: "
+             "the collator right-pads, which Qwen2.5-Omni's flash-attention-2 path "
+             "rejects (raises on padding_side='right'). 'auto' would pick flash-attn-2 "
+             "when installed and crash on the first forward.",
+    )
+    parser.add_argument(
         "--baseline-repo-path",
         type=str,
         default=os.environ.get("DCASE_BASELINE_REPO", VENDORED_SELDNET_REPO),
@@ -1042,6 +1052,7 @@ def build_model(args: argparse.Namespace, processor):
         args.model_id,
         config=config,
         torch_dtype=dtype_from_name(args.dtype),
+        attn_implementation=args.attn_impl,
         low_cpu_mem_usage=True,
     )
     processor.sync_spatial_tokenizer_with_model(model)
