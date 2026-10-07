@@ -136,7 +136,6 @@ python scripts/score_sobench.py \
 
 Use `--offline` with a complete judge cache to recompute local scores. See the [evaluation protocol](https://github.com/dieKarotte/Spatial-Omni/tree/main#evaluation) for aggregation, API error handling and cache reuse.
 
-The recorded protocol uses 20° azimuth, 10° elevation, 1 m distance and 0.2 s onset tolerances; the paper's Appendix D lists different distance/onset tolerances. Report the protocol alongside scores. A four-question check and the legacy `score_test_predictions.py` are not full SO-Bench results.
 
 ## Citation
 
