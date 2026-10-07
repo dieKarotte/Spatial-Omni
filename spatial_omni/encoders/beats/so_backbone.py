@@ -1,4 +1,5 @@
-"""SO-Encoder backbone with acoustic and spatial feature fusion."""
+"""SO-Encoder backbone for first-order ambisonic audio.
+"""
 
 import os
 from dataclasses import dataclass

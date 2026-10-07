@@ -1,4 +1,67 @@
-"""Dispatch SO-7B, zero-spatial, IV and Neural-IV benchmark generation."""
+"""Unified bench driver: one entrypoint to dispatch test-split generation
+across all Spatial-Omni baselines.
+
+Today the repo has three parallel bench scripts that each know how to build
+ONE backbone's model:
+
+    scripts/bench_test_generate.py       -> SO-7B (SO-Encoder + Qwen2.5-Omni)
+    scripts/bench_test_generate_iv.py    -> IV / Neural-IV baseline
+    scripts/bench_test_generate_af3.py   -> AF3 baseline
+
+Each has its own parse_args() + setup_distributed() + main(). This driver is
+a thin dispatcher that chooses one of them based on --baseline, rewrites
+sys.argv to the sub-script's CLI, and calls its main() IN-PROCESS. Because
+we call main() in-process (not subprocess), torchrun wraps run_bench.py just
+like any sub-script -- DDP state is set up once, no nested launches.
+
+## Baselines
+
+    so-7b                (SO-Encoder + Qwen2.5-Omni)
+    so-30b               (SO-Encoder + Qwen3-Omni-30B)
+    zero-spatial         (same backbone as so-7b, but --spatial-ablation zero)
+    zero-spatial-30b     (same backbone as so-30b, but --spatial-ablation zero)
+    iv                   (IV baseline + Qwen2.5-Omni)
+    neural-iv            (Neural-IV baseline + Qwen2.5-Omni)
+    af3                  (AF3 baseline)
+
+Note on iv vs neural-iv: both dispatch to bench_test_generate_iv.py. The
+choice between IV and Neural-IV is encoded inside the checkpoint's
+train_args.json (spatial_encoder_type field), NOT set by this driver. The
+outer --baseline is a labelling / sanity-check knob so you notice if you
+point at the wrong run-dir.
+
+Note on zero-spatial: this is an ablation, not a separate model. It uses
+the so-7b backbone and injects --spatial-ablation zero to the sub-
+script, which zeros the spatial-audio content before generate() while
+keeping attention masks / lengths. Only so-7b supports ablation today;
+--spatial-ablation is NOT exposed on the outer CLI to keep a single
+baseline axis -- to run the ablation, pass --baseline zero-spatial.
+
+## Usage
+
+    torchrun --nproc_per_node=8 scripts/run_bench.py \\
+        --baseline so-7b \\
+        --qa-root /path/to/SO-Dataset/qa \\
+        --split test \\
+        --checkpoint-paths runs/so_7b/stage2_encoder_lora/checkpoints/best_trainable.pt \\
+        --output-dir runs/so_7b/stage2_encoder_lora/bench/test
+
+    torchrun --nproc_per_node=8 scripts/run_bench.py \\
+        --baseline iv \\
+        --qa-root /path/to/SO-Dataset/qa \\
+        --checkpoint-paths runs/iv/stage2_encoder_lora/checkpoints/best_trainable.pt
+
+    torchrun --nproc_per_node=8 scripts/run_bench.py \\
+        --baseline zero-spatial \\
+        --qa-root /path/to/SO-Dataset/qa \\
+        --checkpoint-paths runs/so_7b/stage2_encoder_lora/checkpoints/best_trainable.pt
+
+After predictions.jsonl is emitted, score with (same as today):
+
+    python scripts/score_test_predictions.py \\
+        --predictions-jsonl <output_dir>/<ckpt>/predictions.jsonl \\
+        --azimuth-threshold-deg 20 --elevation-threshold-deg 10
+"""
 
 from __future__ import annotations
 
@@ -15,9 +78,12 @@ if REPO_ROOT not in sys.path:
 # --baseline -> (sub-script module name, extra argv to inject)
 BASELINE_TO_MODULE = {
     "so-7b":              ("scripts.bench_test_generate",       []),
+    "so-30b":             ("scripts.bench_test_generate_qwen3", []),
     "zero-spatial":       ("scripts.bench_test_generate",       ["--spatial-ablation", "zero"]),
+    "zero-spatial-30b":   ("scripts.bench_test_generate_qwen3", ["--spatial-ablation", "zero"]),
     "iv":                 ("scripts.bench_test_generate_iv",    []),
     "neural-iv":          ("scripts.bench_test_generate_iv",    []),
+    "af3":                ("scripts.bench_test_generate_af3",   []),
 }
 
 
@@ -36,8 +102,6 @@ def parse_outer_args() -> argparse.Namespace:
              "bench script; the actual branch comes from the ckpt's train_args.json.",
     )
 
-    p.add_argument("--model-id", default=None)
-    p.add_argument("--beats-checkpoint", default=None)
     # --- Checkpoint selection (three forms, any combo; one of them required) ---
     p.add_argument("--run-dir", type=str, default=None,
                     help="Base dir; used as prefix for --checkpoint-tags / --checkpoint-glob.")
@@ -51,8 +115,6 @@ def parse_outer_args() -> argparse.Namespace:
     # --- Data ---
     p.add_argument("--qa-root", type=str, required=True,
                     help="QA root containing <split>.jsonl.")
-    p.add_argument("--audio-root", default=None)
-    p.add_argument("--audio-roots", nargs="+", default=None)
     p.add_argument("--split", type=str, default="test")
     p.add_argument("--max-samples", type=int, default=None,
                     help="Cap on QA records (smoke-test knob).")
@@ -71,14 +133,14 @@ def parse_outer_args() -> argparse.Namespace:
     p.add_argument("--skip-existing", action="store_true",
                     help="Skip checkpoints whose predictions.jsonl already exists.")
 
-    # --- Inference config (common subset across the generation scripts) ---
+    # --- Inference config (common subset across all three sub-scripts) ---
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--persistent-workers", action="store_true")
     p.add_argument("--prefetch-factor", type=int, default=2)
     p.add_argument("--device", type=str, default="cuda:0")
     p.add_argument("--device-map", type=str, default=None,
-                    help="HF device_map (e.g. 'auto') for the BEATs path. For supported model loaders.")
+                    help="HF device_map (e.g. 'auto') for the BEATs path. Ignored by IV/AF3.")
     p.add_argument("--dtype", type=str, default="bfloat16",
                     choices=("float32", "bfloat16", "float16"))
     p.add_argument("--max-new-tokens", type=int, default=96)
@@ -95,17 +157,18 @@ def parse_outer_args() -> argparse.Namespace:
                          "place it in the FOA W channel, set X/Y/Z to zero, "
                          "and run the normal spatial encoder/projector path.")
 
-    # Optional attention backend for model construction.
+    # --- IV-only but we mirror permissively; BEATs/AF3 will reject if passed ---
     p.add_argument("--attn-impl", type=str, default=None,
                     choices=("auto", "flash_attention_2", "sdpa", "eager"),
-                    help="Override the attention implementation.")
+                    help="[IV / Neural-IV only] Attention implementation. "
+                         "Ignored by so-7b / af3.")
 
     # --- DDP ---
     p.add_argument("--local-rank", type=int, default=-1)
     return p.parse_args()
 
 
-# Subset of outer args that are universally supported by the generation scripts.
+# Subset of outer args that are universally supported by all three sub-scripts.
 # The special-case keys are handled in build_sub_argv().
 _UNIVERSAL_KEYS = {
     "run_dir", "checkpoint_tags", "checkpoint_paths", "checkpoint_glob",
@@ -119,11 +182,15 @@ _UNIVERSAL_KEYS = {
 # Sub-script-specific keys: only forwarded when the target script supports them.
 _SCRIPT_ACCEPTS = {
     "scripts.bench_test_generate":     {
-        "device_map", "model_id", "beats_checkpoint", "attn_impl", "audio_root", "audio_roots",
+        "device_map",
         "mono_audio_zero_spatial_tokens",
         "mono_audio_w_channel_spatial_encoder",
     },  # BEATs
     "scripts.bench_test_generate_iv":  {"attn_impl", "device_map"},    # IV
+    "scripts.bench_test_generate_af3": {
+        "mono_audio_zero_spatial_tokens",
+        "mono_audio_w_channel_spatial_encoder",
+    },
 }
 
 

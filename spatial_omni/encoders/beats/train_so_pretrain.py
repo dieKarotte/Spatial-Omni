@@ -1,4 +1,4 @@
-"""Train and evaluate the SO-Encoder with spatial audio supervision."""
+'Train and evaluate the SO-Encoder with spatial audio supervision.'
 
 import argparse
 import contextlib

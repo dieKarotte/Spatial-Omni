@@ -59,50 +59,17 @@ def load_release_state(model, state_dict: Mapping[str, Any]):
     return model.load_state_dict(state_dict, strict=False)
 
 
-def apply_checkpoint_architecture(args, argv):
-    """Use saved model structure for resume unless the caller overrides an option."""
-    checkpoint = getattr(args, "resume_checkpoint_path", None)
-    if not checkpoint and getattr(args, "resume_tag", None):
-        checkpoint = Path(args.output_dir) / "checkpoints" / (args.resume_tag + "_trainable.pt")
-    if not checkpoint:
-        return
-    checkpoint = Path(checkpoint).expanduser().resolve()
-    candidates = [checkpoint.parent / "train_args.json"]
-    if checkpoint.parent.name == "checkpoints":
-        candidates.append(checkpoint.parent.parent / "train_args.json")
-    config_path = next((p for p in candidates if p.is_file()), None)
-    if config_path is None:
-        return
-    with config_path.open(encoding="utf-8") as handle:
-        saved = json.load(handle)
-    explicit = {str(option).split("=", 1)[0] for option in argv if str(option).startswith("--")}
-    structural_fields = (
-        "lora_r", "lora_alpha", "lora_dropout", "lora_target_modules", "lora_target_prefixes",
-        "projector_type", "projector_shuffle_factor", "encoder_token_rate",
-        "mixed_spatial_replay",
-    )
-    for key in structural_fields:
-        option = "--" + key.replace("_", "-")
-        if option not in explicit and key in saved and saved[key] is not None:
-            setattr(args, key, saved[key])
-    mode_flags = {"--projector-only", "--encoder-lora", "--beats-lora", "--train-all"}
-    if not explicit.intersection(mode_flags) and saved.get("train_mode") is not None:
-        if saved["train_mode"] not in {"projector_only", "encoder_lora", "beats_lora", "all"}:
-            raise ValueError(f"Unsupported saved train_mode: {saved['train_mode']}")
-        args.train_mode = saved["train_mode"]
-
-
 def load_curriculum_state(model, state_dict):
-    """Reject incomplete components while allowing whole newly enabled stage components."""
-    parameters = dict(model.named_parameters())
-    required = {name for name, parameter in parameters.items() if parameter.requires_grad}
-    available = set(model.state_dict())
+    """Reject partial components while allowing complete new stage components."""
+    required = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
     newly_enabled = set()
-    for marker in ("so_encoder.", "lora_", "spatial_null"):
+    for marker in ("so_encoder.", "lora_", "spatial_null", ".mlp.gate."):
         if not any(marker in name for name in state_dict):
             newly_enabled.update(name for name in required if marker in name)
     missing = sorted(required - set(state_dict) - newly_enabled)
-    unexpected = sorted(set(state_dict) - available)
+    unexpected = sorted(set(state_dict) - set(model.state_dict()))
     if missing or unexpected:
-        raise RuntimeError(f"Incompatible training checkpoint: missing={missing[:12]}, unexpected={unexpected[:12]}")
+        raise RuntimeError(
+            f"Incompatible training checkpoint: missing={missing[:12]}, unexpected={unexpected[:12]}"
+        )
     return model.load_state_dict(state_dict, strict=False)

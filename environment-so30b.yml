@@ -1,0 +1,42 @@
+# SO-30B environment. See docs/so30b.md for installation and GPU requirements.
+name: spatial-omni-30b
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip>=24
+  - setuptools
+  - wheel
+  - git
+  - ffmpeg
+  - libsndfile
+  - pip:
+      # PyTorch CUDA 12.8 wheels (cu128 runtime; needs a 12.8-capable driver).
+      - --index-url https://download.pytorch.org/whl/cu128
+      - --extra-index-url https://pypi.org/simple
+      - torch==2.9.0
+      - torchaudio==2.9.0
+      # Transformers stack with Qwen3-Omni-MoE support.
+      - transformers==5.0.0
+      - tokenizers>=0.22,<0.23
+      - peft==0.18.1
+      - accelerate==1.13.0
+      - safetensors>=0.6.2
+      - huggingface-hub>=1.3,<2.0
+      # Audio I/O & signal processing
+      - soundfile==0.13.1
+      - librosa==0.11.0
+      - scipy==1.15.3
+      - numpy==2.2.6
+      # SO-Encoder (vendored BEATs)
+      - einops==0.6.1
+      # Tokenizer / config backends
+      - sentencepiece==0.1.99
+      - protobuf==5.29.5
+      - pyyaml==6.0.2
+      # Training utilities
+      - tqdm==4.67.1
+      - tensorboard==2.20.0
+      # Optional: flash-attention 2 (enables ATTN_IMPL=flash_attention_2; the
+      # trainer falls back to sdpa if absent). Build can take a while:
+      # - flash-attn==2.8.3

@@ -35,7 +35,7 @@ import os
 import sys
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -47,6 +47,12 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
+
+from spatial_omni.utils.replay_data import (
+    OssAudioReader,
+    iter_qa_records,
+    normalize_replay_record,
+)
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
@@ -103,10 +109,35 @@ def parse_args():
                          "Auto-enabled when --replay-qa-root(s) is provided.")
     p.add_argument("--spatial-replay-ratio", type=int, default=3,
                     help="Number of spatial samples per replay sample (default 3).")
+    p.add_argument("--train-subset-ratio", type=float, default=None,
+                    help="Deterministically train on this fraction of the spatial QA "
+                         "dataset (e.g. 0.2 for a 20%% ablation). Applied before replay mixing.")
+    p.add_argument("--mix-full-replay", action="store_true",
+                    help="Mix the full replay pool (each replay sample once per epoch) "
+                         "with the spatial set via concatenation instead of the "
+                         "deterministic N:1 interleave; --spatial-replay-ratio is ignored. "
+                         "The shuffled DistributedSampler provides the mixing.")
+    p.add_argument("--replay-max-text-chars", type=int, default=8000,
+                    help="Skip replay records whose prompt+answer exceeds this many "
+                         "chars (default 8000, 0 disables). Long sequences make the "
+                         "MoE router aux loss allocate O(layers x tokens x top_k x "
+                         "experts) tensors and can OOM.")
+    p.add_argument("--oss-config", default=None,
+                    help="OSS credential config for replay audio. Supports ossutil INI "
+                         "and Qwen bucket JSON. Default: SO_OSS_CONFIG or ~/.ossutilconfig.")
+    p.add_argument("--oss-cache-dir", default=None,
+                    help="Optional local cache for raw OSS audio objects.")
+    p.add_argument("--oss-read-retries", type=int, default=3,
+                    help="Maximum OSS GET attempts per object (default 3).")
+    p.add_argument("--oss-connect-timeout", type=float, default=30.0,
+                    help="OSS client connection timeout in seconds (default 30).")
     p.add_argument("--null-alignment-weight", type=float, default=0.05,
                     help="MSE weight for W-only null-alignment loss (default 0.05).")
     p.add_argument("--spatial-null-lr", type=float, default=None,
                     help="LR override for the spatial_null parameter. Default: --projector-lr or --lr.")
+    p.add_argument("--mem-log-interval", type=int, default=0,
+                    help="If >0, append per-rank GPU peak-memory JSON lines to "
+                         "<output-dir>/gpu_mem_log.rank<N>.jsonl every N optimizer steps.")
     p.add_argument("--audio-feature-cache-manifest", default=None)
     p.add_argument("--audio-feature-cache-max-entries", type=int, default=256)
     p.add_argument("--train-split", default="train")
@@ -153,6 +184,23 @@ def parse_args():
     p.add_argument("--lora-dropout", type=float, default=0.05)
     p.add_argument("--lora-target-modules", nargs="+", default=list(DEFAULT_LORA_TARGET_MODULES))
     p.add_argument("--lora-target-prefixes", nargs="+", default=["thinker.model"])
+    p.add_argument(
+        "--train-moe-router",
+        action="store_true",
+        help="Unfreeze MoE router weights during LoRA stages. Recommended only after projector alignment.",
+    )
+    p.add_argument(
+        "--moe-router-lr",
+        type=float,
+        default=None,
+        help="LR for fully trainable MoE router weights. Default: --lr.",
+    )
+    p.add_argument(
+        "--moe-router-aux-loss-coef",
+        type=float,
+        default=1e-3,
+        help="Load-balancing auxiliary loss used when --train-moe-router is enabled.",
+    )
     p.add_argument("--gradient-checkpointing", action="store_true")
     p.add_argument("--attn-impl", default="auto",
                    choices=("flash_attention_2", "sdpa", "eager", "auto"),
@@ -195,11 +243,21 @@ def parse_args():
     p.add_argument("--save-every-epoch", action="store_true")
     p.add_argument("--save-every-n-optimizer-steps", type=int, default=1000)
     p.add_argument("--valid-every-n-optimizer-steps", type=int, default=1000)
-    p.add_argument("--save-full-model", action="store_true")
+    p.add_argument(
+        "--save-export-bundle",
+        action="store_true",
+        help=(
+            "Save a PEFT adapter/processor bundle plus a complete trainable-state file. "
+            "The frozen base checkpoint remains external."
+        ),
+    )
+    p.add_argument(
+        "--save-full-model",
+        action="store_true",
+        help="Deprecated alias for --save-export-bundle; this does not merge the frozen base model.",
+    )
     p.set_defaults(train_mode="projector_only", save_every_epoch=True)
     args = p.parse_args()
-    from spatial_omni.utils.release import apply_checkpoint_architecture
-    apply_checkpoint_architecture(args, sys.argv[1:])
     if args.qa_roots:
         args.qa_roots = [os.path.abspath(r) for r in args.qa_roots]
     else:
@@ -222,6 +280,18 @@ def parse_args():
     args.mixed_spatial_replay = bool(args.mixed_spatial_replay or args.replay_qa_roots)
     if args.replay_train_split is None:
         args.replay_train_split = args.train_split
+    if args.train_subset_ratio is not None and not (0.0 < args.train_subset_ratio <= 1.0):
+        p.error("--train-subset-ratio must be in (0, 1]")
+    if args.mix_full_replay and not args.mixed_spatial_replay:
+        p.error("--mix-full-replay requires replay data (--replay-qa-roots)")
+    if args.replay_max_text_chars < 0:
+        p.error("--replay-max-text-chars must be >= 0")
+    if args.oss_read_retries < 1:
+        p.error("--oss-read-retries must be at least 1")
+    if args.oss_connect_timeout <= 0:
+        p.error("--oss-connect-timeout must be positive")
+    if args.mem_log_interval < 0:
+        p.error("--mem-log-interval must be >= 0")
     return args
 
 
@@ -311,14 +381,21 @@ def load_qa_records(qa_path, max_samples=None):
     raise ValueError(f"Unsupported format: {qa_path}")
 
 def resolve_qa_split_path(qa_root, split_name):
+    qa_root = os.path.abspath(os.path.expanduser(qa_root))
+    if os.path.isfile(qa_root):
+        if qa_root.lower().endswith((".jsonl", ".json")):
+            return qa_root
+        raise ValueError(f"Direct QA manifest must be JSON or JSONL: {qa_root}")
     for ext in (".jsonl", ".json"):
         p = os.path.join(qa_root, f"{split_name}{ext}")
         if os.path.exists(p): return os.path.abspath(p)
     raise FileNotFoundError(f"Missing '{split_name}' under {qa_root}")
 
 class QAAudioDataset(Dataset):
-    def __init__(self, path, max_samples=None, audio_search_roots=None):
+    def __init__(self, path, max_samples=None, audio_search_roots=None, max_text_chars=None):
         self.records = []
+        self.skipped_unsupported_audio_uris = 0
+        self.skipped_overlength_text = 0
         # Audio-path resolution roots (in priority order). The first root is
         # always the directory of the JSONL itself (legacy behavior). When
         # ``audio_search_roots`` is supplied (e.g. SO-Dataset HF release where
@@ -339,24 +416,51 @@ class QAAudioDataset(Dataset):
         if parent and parent != qa_dir and parent not in roots:
             roots.append(parent)
         self._audio_search_roots = roots
+        # relative-dir -> resolved root (None = probed, not found anywhere)
+        self._dir_root_cache = {}
 
-        for i, r in enumerate(load_qa_records(path, max_samples)):
+        for i, raw_record in enumerate(iter_qa_records(path)):
+            if max_samples is not None and len(self.records) >= max_samples:
+                break
+            r = normalize_replay_record(
+                raw_record, source_path=path, record_index=i
+            )
             ap = r.get("audio_path")
             if ap is None:
                 raise ValueError(f"Record {i} missing audio_path")
+            if not isinstance(ap, str) or not ap.strip():
+                raise ValueError(f"Record {i} has an invalid audio_path")
+            ap = ap.strip()
+            r["audio_path"] = ap
+            if "://" in ap and not OssAudioReader.is_oss_path(ap):
+                if r.get("_replay_source_format") == "qwen_chatml":
+                    self.skipped_unsupported_audio_uris += 1
+                    continue
+                raise ValueError(
+                    f"Record {i} uses unsupported audio URI scheme: {ap.split('://', 1)[0]}"
+                )
             # Resolve audio_path once. Skip stat() for already-absolute paths
             # to avoid O(N) NFS stalls; only probe roots when the path is
-            # relative.
-            if not os.path.isabs(ap):
-                resolved = None
-                for root in self._audio_search_roots:
-                    cand = os.path.join(root, ap)
-                    if os.path.exists(cand):
-                        resolved = cand
-                        break
-                # If none of the roots have it, fall back to qa-dir-relative
-                # so the missing-file error message points somewhere stable.
-                r["audio_path"] = resolved or os.path.join(qa_dir, ap)
+            # relative. The probe result is cached per relative *directory*:
+            # 1.3M records share a handful of dirs (audio/train, ...), and the
+            # 2 CPFS stats per record used to cost ~50 min per launch (hours
+            # once 32 ranks contend for the same metadata service) while the
+            # JSON parse itself takes seconds. Assumes all files of one
+            # relative dir live under one root (true for SO-Dataset layouts);
+            # genuinely missing files still fail at audio-read time as before.
+            if not OssAudioReader.is_oss_path(ap) and not os.path.isabs(ap):
+                rel_dir = os.path.dirname(ap)
+                if rel_dir not in self._dir_root_cache:
+                    hit = None
+                    for root in self._audio_search_roots:
+                        if os.path.exists(os.path.join(root, ap)):
+                            hit = root
+                            break
+                    self._dir_root_cache[rel_dir] = hit
+                cached_root = self._dir_root_cache[rel_dir]
+                # If no root has it, fall back to qa-dir-relative so the
+                # missing-file error message points somewhere stable.
+                r["audio_path"] = os.path.join(cached_root or qa_dir, ap)
             # 兼容两种数据格式：
             #   - 旧版 QA: 同时有 `prompt`（带 "Question: ...\nAnswer with only..."
             #     包装）和 `question`（裸问题）
@@ -369,16 +473,32 @@ class QAAudioDataset(Dataset):
                 r["prompt"] = str(q)
             if r.get("answer") is None:
                 raise ValueError(f"Record {i} missing answer")
+            if max_text_chars:
+                n_chars = len(str(r["prompt"])) + len(str(r["answer"]))
+                if n_chars > max_text_chars:
+                    self.skipped_overlength_text += 1
+                    continue
             self.records.append(r)
+        if self.skipped_unsupported_audio_uris:
+            rank0_print(
+                f"Skipped {self.skipped_unsupported_audio_uris:,} ChatML record(s) "
+                "with unsupported non-OSS audio URIs."
+            )
+        if self.skipped_overlength_text:
+            rank0_print(
+                f"Skipped {self.skipped_overlength_text:,} record(s) with "
+                f"prompt+answer longer than {max_text_chars:,} chars."
+            )
     def __len__(self): return len(self.records)
     def __getitem__(self, i): return self.records[i]
 
-def build_qa_dataset(qa_roots, split, max_samples, audio_search_roots=None):
+def build_qa_dataset(qa_roots, split, max_samples, audio_search_roots=None, max_text_chars=None):
     ps, ds, ss = [], [], []
     for root in qa_roots:
         p = resolve_qa_split_path(root, split)
         rank0_print(f"[{time.strftime('%H:%M:%S')}] Loading {split} split: {p} ...")
-        d = QAAudioDataset(p, max_samples, audio_search_roots=audio_search_roots)
+        d = QAAudioDataset(p, max_samples, audio_search_roots=audio_search_roots,
+                           max_text_chars=max_text_chars)
         rank0_print(f"[{time.strftime('%H:%M:%S')}] Loaded {len(d):,} records.")
         ps.append(p); ds.append(d); ss.append(len(d))
     if len(ds) == 1: return ds[0], ps, ss
@@ -480,6 +600,16 @@ def build_left_padded_batch(input_ids, attn, prefix_lengths, pad_id):
 # Collator
 # ---------------------------------------------------------------------------
 
+def build_qa_text_parts(processor, prompt: str, answer: str) -> Tuple[str, str]:
+    """Build model-specific QA text while preserving the legacy 7B format."""
+
+    if hasattr(processor, "build_qa_text_parts"):
+        return processor.build_qa_text_parts(prompt=prompt, answer=answer)
+    eos = getattr(processor.tokenizer, "eos_token", None) or ""
+    prefix = processor.audio_token + processor.spatial_token + f"\n{str(prompt).rstrip()}\n"
+    return prefix, str(answer).strip() + eos
+
+
 @dataclass
 class SpatialBeatsQACollator:
     """Collate FOA audio + QA text pairs into training/generation batches.
@@ -496,6 +626,27 @@ class SpatialBeatsQACollator:
     include_generation_inputs: bool = False
     target_token_rate: float = TARGET_TOKEN_RATE
     enable_mono_replay: bool = False
+    oss_config: Optional[str] = None
+    oss_cache_dir: Optional[str] = None
+    oss_read_retries: int = 3
+    oss_connect_timeout: float = 30.0
+    _audio_reader: Optional[OssAudioReader] = field(
+        default=None, init=False, repr=False
+    )
+
+    def _read_audio(self, audio_path: str) -> Tuple[np.ndarray, int]:
+        if not OssAudioReader.is_oss_path(audio_path):
+            return sf.read(audio_path, dtype="float32", always_2d=True)
+        if self._audio_reader is None:
+            self._audio_reader = OssAudioReader(
+                config_path=self.oss_config,
+                cache_dir=self.oss_cache_dir,
+                retries=self.oss_read_retries,
+                connect_timeout=self.oss_connect_timeout,
+            )
+        return self._audio_reader.read_audio(
+            audio_path, dtype="float32", always_2d=True
+        )
 
     @staticmethod
     def _downmix_to_mono(wav_2d: np.ndarray) -> np.ndarray:
@@ -525,7 +676,6 @@ class SpatialBeatsQACollator:
             return self._call_mixed_replay(features)
         audio_arrs, full_texts, ans_sfxs, meta, sa_lens = [], [], [], [], []
         cached_input_features, cached_feature_lengths = [], []
-        eos = getattr(self.processor.tokenizer, "eos_token", None) or ""
 
         for feat in features:
             cache_item = None
@@ -538,7 +688,7 @@ class SpatialBeatsQACollator:
                 T = int(cache_item["spatial_audio_length"].item())
                 wav = wav[:, :T]
             else:
-                wav, sr = sf.read(feat["audio_path"], dtype="float32", always_2d=True)
+                wav, sr = self._read_audio(feat["audio_path"])
                 if sr != self.sample_rate:
                     raise ValueError(f"Expected {self.sample_rate}Hz got {sr} for {feat['audio_path']}")
                 wav = wav.T  # [4, T]
@@ -550,13 +700,11 @@ class SpatialBeatsQACollator:
             sa_lens.append(T)
             # Keep a single placeholder in text. The processor expands it to
             # the required number of spatial tokens using spatial_token_lengths.
-            prefix = (
-                self.processor.audio_token
-                + self.processor.spatial_token
-                + f"\n{feat['prompt'].rstrip()}\n"
+            prefix, ans_sfx = build_qa_text_parts(
+                processor=self.processor,
+                prompt=feat["prompt"],
+                answer=feat["answer"],
             )
-            ans = str(feat["answer"]).strip()
-            ans_sfx = ans + eos
             full_texts.append(prefix + ans_sfx)
             ans_sfxs.append(ans_sfx)
             audio_arrs.append(wav.astype(np.float32, copy=False))
@@ -698,7 +846,6 @@ class SpatialBeatsQACollator:
         expands it to `spatial_token_lengths[i]` repeats and the model fills
         them with `spatial_null` at runtime.
         """
-        eos = getattr(self.processor.tokenizer, "eos_token", None) or ""
         audio_arrs, full_texts, ans_sfxs, meta = [], [], [], []
         sa_lens: List[int] = []
         has_spatial_list: List[bool] = []
@@ -707,7 +854,7 @@ class SpatialBeatsQACollator:
 
         for feat in features:
             is_spatial = bool(feat.get("_replay_has_spatial", feat.get("has_spatial", True)))
-            wav, sr = sf.read(feat["audio_path"], dtype="float32", always_2d=True)
+            wav, sr = self._read_audio(feat["audio_path"])
             wav = self._resample_if_needed(wav, sr, feat["audio_path"])
             if is_spatial:
                 if wav.shape[1] != 4:
@@ -736,13 +883,11 @@ class SpatialBeatsQACollator:
             mono_arrays.append(mono.astype(np.float32, copy=False))
             has_spatial_list.append(is_spatial)
 
-            prefix = (
-                self.processor.audio_token
-                + self.processor.spatial_token
-                + f"\n{feat['prompt'].rstrip()}\n"
+            prefix, ans_sfx = build_qa_text_parts(
+                processor=self.processor,
+                prompt=feat["prompt"],
+                answer=feat["answer"],
             )
-            ans = str(feat["answer"]).strip()
-            ans_sfx = ans + eos
             full_texts.append(prefix + ans_sfx)
             ans_sfxs.append(ans_sfx)
             meta.append({
@@ -1147,25 +1292,63 @@ def resolve_lora_target_modules(model, prefixes, suffixes):
     if not res: raise ValueError(f"No LoRA targets under {prefixes} with {suffixes}.")
     return sorted(set(res))
 
+
+def is_moe_router_parameter(name: str) -> bool:
+    """Match Qwen-style top-k router matrices without matching expert weights."""
+
+    return name.endswith(".mlp.gate.weight") or (
+        ".mlp.gate.modules_to_save." in name and name.endswith(".weight")
+    )
+
+
+def resolve_moe_router_modules(model):
+    return sorted(
+        module_name
+        for module_name, _ in model.named_modules()
+        if is_moe_router_parameter(f"{module_name}.weight")
+    )
+
+
 def apply_llm_lora(model, args):
     if get_peft_model is None: raise ImportError("pip install peft")
     tm = resolve_lora_target_modules(
         model, list(args.lora_target_prefixes), list(args.lora_target_modules)
     )
+    router_modules = (
+        resolve_moe_router_modules(model)
+        if getattr(args, "train_moe_router", False)
+        else []
+    )
+    if getattr(args, "train_moe_router", False) and not router_modules:
+        raise ValueError("--train-moe-router was set but no MoE router modules were found.")
     lc = LoraConfig(r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
-                    bias="none", task_type=TaskType.CAUSAL_LM, target_modules=tm)
+                    bias="none", task_type=TaskType.CAUSAL_LM, target_modules=tm,
+                    modules_to_save=router_modules or None)
     model = get_peft_model(model, lc)
     if args.gradient_checkpointing and hasattr(model, "enable_input_require_grads"):
         model.enable_input_require_grads()
     return model, tm
 
+
+def should_train_parameter(name: str, args, include_encoder: bool = False) -> bool:
+    if "so_projector" in name or "lora_" in name:
+        return True
+    if include_encoder and "so_encoder" in name:
+        return True
+    return bool(getattr(args, "train_moe_router", False)) and is_moe_router_parameter(name)
+
+
 def configure_encoder_lora_training(model, args):
-    """Stage 2: projector + LoRA trainable, BEATs frozen."""
+    """Stage 2: projector + LoRA, with optional MoE router adaptation."""
     enabled = []
     for _, p in model.named_parameters(): p.requires_grad_(False)
     for n, p in model.named_parameters():
-        if "so_projector" in n or "lora_" in n:
+        if should_train_parameter(n, args, include_encoder=False):
             p.requires_grad_(True); enabled.append(n)
+    if getattr(args, "train_moe_router", False) and not any(
+        is_moe_router_parameter(name) for name in enabled
+    ):
+        raise ValueError("--train-moe-router was set but no MoE router weights were found.")
     return enabled
 
 def configure_beats_lora_training(model, args):
@@ -1180,8 +1363,12 @@ def configure_beats_lora_training(model, args):
     else:
         rank0_print("WARNING: so_encoder not found!")
     for n, p in model.named_parameters():
-        if "so_projector" in n or "so_encoder" in n or "lora_" in n:
+        if should_train_parameter(n, args, include_encoder=True):
             p.requires_grad_(True); enabled.append(n)
+    if getattr(args, "train_moe_router", False) and not any(
+        is_moe_router_parameter(name) for name in enabled
+    ):
+        raise ValueError("--train-moe-router was set but no MoE router weights were found.")
     return enabled
 
 
@@ -1207,8 +1394,16 @@ def configure_mixed_replay_training(model, args):
             or "so_encoder" in n
             or "spatial_null" in n
             or "lora_" in n
+            or (
+                getattr(args, "train_moe_router", False)
+                and is_moe_router_parameter(n)
+            )
         ):
             p.requires_grad_(True); enabled.append(n)
+    if getattr(args, "train_moe_router", False) and not any(
+        is_moe_router_parameter(name) for name in enabled
+    ):
+        raise ValueError("--train-moe-router was set but no MoE router weights were found.")
     return enabled
 
 
@@ -1227,10 +1422,18 @@ def build_optimizer(model, args):
         "projector_decay": [], "projector_nodecay": [],
         "lora_decay": [],      "lora_nodecay": [],
         "beats_decay": [],     "beats_nodecay": [],
+        "router_decay": [],    "router_nodecay": [],
         "null_decay": [],      "null_nodecay": [],
         "other_decay": [],     "other_nodecay": [],
     }
-    counts = {"projector": 0, "lora": 0, "beats": 0, "null": 0, "other": 0}
+    counts = {
+        "projector": 0,
+        "lora": 0,
+        "beats": 0,
+        "router": 0,
+        "null": 0,
+        "other": 0,
+    }
     for n, p in model.named_parameters():
         if not p.requires_grad:
             continue
@@ -1241,6 +1444,8 @@ def build_optimizer(model, args):
             key = "lora"
         elif "so_encoder" in n:
             key = "beats"
+        elif is_moe_router_parameter(n):
+            key = "router"
         elif "spatial_null" in n:
             key = "null"
         else:
@@ -1252,6 +1457,11 @@ def build_optimizer(model, args):
     proj_lr  = args.projector_lr if args.projector_lr is not None else base_lr
     lora_lr  = args.lora_lr      if args.lora_lr      is not None else base_lr
     beats_lr = args.beats_lr     if args.beats_lr     is not None else base_lr
+    router_lr = (
+        args.moe_router_lr
+        if getattr(args, "moe_router_lr", None) is not None
+        else base_lr
+    )
     null_lr  = (args.spatial_null_lr if getattr(args, "spatial_null_lr", None) is not None
                 else proj_lr)
     proj_wd  = args.projector_weight_decay if args.projector_weight_decay is not None else args.weight_decay
@@ -1263,6 +1473,8 @@ def build_optimizer(model, args):
         {"params": buckets["lora_nodecay"],      "lr": lora_lr,  "weight_decay": 0.0,                "name": "lora_nodecay"},
         {"params": buckets["beats_decay"],       "lr": beats_lr, "weight_decay": args.weight_decay,  "name": "beats_decay"},
         {"params": buckets["beats_nodecay"],     "lr": beats_lr, "weight_decay": 0.0,                "name": "beats_nodecay"},
+        {"params": buckets["router_decay"],      "lr": router_lr,"weight_decay": 0.0,                "name": "router_decay"},
+        {"params": buckets["router_nodecay"],    "lr": router_lr,"weight_decay": 0.0,                "name": "router_nodecay"},
         {"params": buckets["null_decay"],        "lr": null_lr,  "weight_decay": args.weight_decay,  "name": "null_decay"},
         {"params": buckets["null_nodecay"],      "lr": null_lr,  "weight_decay": 0.0,                "name": "null_nodecay"},
         {"params": buckets["other_decay"],       "lr": base_lr,  "weight_decay": args.weight_decay,  "name": "other_decay"},
@@ -1273,6 +1485,7 @@ def build_optimizer(model, args):
         f"Optimizer groups: projector={counts['projector']}(lr={proj_lr:.2e},wd={proj_wd}) "
         f"lora={counts['lora']}(lr={lora_lr:.2e}) "
         f"beats={counts['beats']}(lr={beats_lr:.2e}) "
+        f"router={counts['router']}(lr={router_lr:.2e}) "
         f"spatial_null={counts['null']}(lr={null_lr:.2e}) "
         f"other={counts['other']}(lr={base_lr:.2e})"
     )
@@ -1293,19 +1506,71 @@ def resolve_resume_path(args):
 
 def save_trainable_checkpoint(model, opt, sched, path, epoch, step, metrics):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    ts = {n: p.detach().cpu() for n, p in unwrap_model(model).named_parameters() if p.requires_grad}
+    ts = collect_trainable_state_dict(model)
     torch.save({"epoch": epoch, "step": step, "metrics": metrics,
                 "trainable_state_dict": ts, "optimizer": opt.state_dict(),
                 "scheduler": sched.state_dict() if sched else None}, path)
+
+
+def collect_trainable_state_dict(model):
+    return {
+        name: parameter.detach().cpu()
+        for name, parameter in unwrap_model(model).named_parameters()
+        if parameter.requires_grad
+    }
+
+
+def save_export_bundle(model, processor, export_dir, args):
+    """Save trainable state without copying or pretending to merge the 30B base."""
+
+    os.makedirs(export_dir, exist_ok=True)
+    inner = unwrap_model(model)
+    has_peft_adapter = hasattr(inner, "peft_config")
+    bundle_format = (
+        "spatial-omni-peft-bundle-v1"
+        if has_peft_adapter
+        else "spatial-omni-trainable-bundle-v1"
+    )
+    if has_peft_adapter:
+        # PeftModel.save_pretrained writes only adapter weights/config. Calling
+        # save_pretrained on the non-PEFT stage-1 model would duplicate 30B of
+        # frozen base weights into every export directory.
+        inner.save_pretrained(export_dir)
+    processor.save_pretrained(export_dir)
+    state_filename = "spatial_trainable_state.pt"
+    torch.save(
+        {
+            "format": bundle_format,
+            "trainable_state_dict": collect_trainable_state_dict(inner),
+        },
+        os.path.join(export_dir, state_filename),
+    )
+    with open(os.path.join(export_dir, "train_args.json"), "w", encoding="utf-8") as handle:
+        json.dump(vars(args), handle, indent=2, sort_keys=True)
+    with open(os.path.join(export_dir, "spatial_export_manifest.json"), "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "format": bundle_format,
+                "base_model": os.path.abspath(args.model_id),
+                "adapter_directory": "." if has_peft_adapter else None,
+                "has_peft_adapter": has_peft_adapter,
+                "trainable_state": state_filename,
+                "merged_base_model": False,
+            },
+            handle,
+            indent=2,
+            sort_keys=True,
+        )
+
 
 def save_artifacts(model, processor, opt, sched, args, epoch, step, metrics, tag):
     if not is_main_process(): return
     cd = os.path.join(args.output_dir, "checkpoints"); os.makedirs(cd, exist_ok=True)
     save_trainable_checkpoint(model, opt, sched, os.path.join(cd, f"{tag}_trainable.pt"),
                             epoch, step, metrics)
-    if args.save_full_model:
-        fd = os.path.join(cd, f"{tag}_full")
-        unwrap_model(model).save_pretrained(fd); processor.save_pretrained(fd)
+    if args.save_export_bundle or args.save_full_model:
+        export_dir = os.path.join(cd, f"{tag}_export")
+        save_export_bundle(model, processor, export_dir, args)
 
 def align_peft_prefix(state_dict, model):
     """Reconcile the PEFT ``base_model.model.`` prefix between a saved
@@ -1419,6 +1684,8 @@ def compute_batch_loss(model, batch, device):
         "loss": base_loss,
         "supervised_tokens": count_supervised_tokens(batch["labels"]),
     }
+    if getattr(out, "aux_loss", None) is not None:
+        stats["router_aux_loss"] = float(out.aux_loss.detach())
     # Only emit the extended replay-stat keys when the model actually populated
     # them this step. Default training (no <has_spatial> / no replay) leaves
     # `_last_spatial_replay_stats` empty so we keep stats narrow and
@@ -1462,7 +1729,8 @@ def evaluate(model, loader, device):
 
 def train_one_epoch(model, loader, opt, sched, device, grad_accum_steps, max_grad_norm,
                     log_every, epoch, optimizer_step_per_batch, writer=None,
-                    global_step_start=0, global_optimizer_step_start=0, on_optimizer_step=None):
+                    global_step_start=0, global_optimizer_step_start=0, on_optimizer_step=None,
+                    mem_log_interval=0, mem_log_path=None):
     model.train(); opt.zero_grad(set_to_none=True)
     # Stage-3 (BEATs unfrozen) calls torch.stft / torch.fft.rfft inside the
     # spatial preprocessor on every forward. After ~10k+ steps cuFFT's plan
@@ -1474,6 +1742,19 @@ def train_one_epoch(model, loader, opt, sched, device, grad_accum_steps, max_gra
             torch.backends.cuda.cufft_plan_cache.max_size = 8
         except Exception:
             pass
+    mem_log_enabled = bool(
+        mem_log_interval > 0 and mem_log_path and torch.cuda.is_available()
+    )
+    if mem_log_enabled:
+        with open(mem_log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "event": "baseline",
+                "epoch": epoch,
+                "rank": get_rank(),
+                "alloc_gb": round(torch.cuda.memory_allocated() / 2**30, 3),
+                "reserved_gb": round(torch.cuda.memory_reserved() / 2**30, 3),
+            }) + "\n")
+        torch.cuda.reset_peak_memory_stats()
     tw, ts, os_ = 0.0, 0, 0; t0 = time.time()
     replay_totals = {
         "loss_ce": 0.0, "loss_null": 0.0,
@@ -1500,15 +1781,8 @@ def train_one_epoch(model, loader, opt, sched, device, grad_accum_steps, max_gra
         with ctx: (loss / grad_accum_steps).backward()
         if should:
             if max_grad_norm > 0:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    [p for p in model.parameters() if p.requires_grad], max_grad_norm,
-                    error_if_nonfinite=True,
-                )
-                if writer is not None:
-                    writer.add_scalar("train/grad_norm", float(grad_norm),
-                                      global_optimizer_step_start + os_ + 1)
-                if is_main_process() and step % max(1, log_every) == 0:
-                    rank0_print(f"[gradient] step={step} norm={float(grad_norm):.6f}")
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad], max_grad_norm)
             opt.step()
             if sched is not None: sched.step()
             opt.zero_grad(set_to_none=True); os_ += 1
@@ -1517,6 +1791,19 @@ def train_one_epoch(model, loader, opt, sched, device, grad_accum_steps, max_gra
                                 {"epoch": epoch, "micro_step": step,
                                     "loss": stats["loss"],
                                     "supervised_tokens": stats["supervised_tokens"]})
+            if mem_log_enabled and os_ % mem_log_interval == 0:
+                with open(mem_log_path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({
+                        "event": "step",
+                        "epoch": epoch,
+                        "rank": get_rank(),
+                        "optimizer_step": global_optimizer_step_start + os_,
+                        "micro_step": step,
+                        "loss": round(float(stats["loss"]), 4),
+                        "peak_alloc_gb": round(torch.cuda.max_memory_allocated() / 2**30, 3),
+                        "peak_reserved_gb": round(torch.cuda.max_memory_reserved() / 2**30, 3),
+                    }) + "\n")
+                torch.cuda.reset_peak_memory_stats()
         lr = opt.param_groups[0]["lr"]
         if is_main_process():
             postfix = {
@@ -1529,6 +1816,8 @@ def train_one_epoch(model, loader, opt, sched, device, grad_accum_steps, max_gra
                 postfix["null"] = f"{stats.get('loss_null', 0.0):.4f}"
                 postfix["sp"] = int(stats.get("spatial_samples", 0))
                 postfix["rp"] = int(stats.get("replay_samples", 0))
+            if "router_aux_loss" in stats:
+                postfix["router_aux"] = f"{stats['router_aux_loss']:.4f}"
             prog.set_postfix(**postfix)
         if writer is not None:
             g = global_step_start + step
@@ -1537,6 +1826,7 @@ def train_one_epoch(model, loader, opt, sched, device, grad_accum_steps, max_gra
             for key in (
                 "loss_ce", "loss_null", "spatial_samples", "replay_samples",
                 "spatial_null_norm", "w_only_tokens_norm", "w_only_null_cosine",
+                "router_aux_loss",
             ):
                 if key in stats:
                     writer.add_scalar(f"train/batch_{key}", stats[key], g)
@@ -1726,12 +2016,14 @@ def main():
             f"Using audio feature cache: {audio_feature_cache.manifest_path} "
             f"(entries={len(audio_feature_cache):,}, in_memory_max={audio_feature_cache.max_entries})"
         )
-    if is_main_process():
-        pd_ = os.path.join(args.output_dir, "processor"); os.makedirs(pd_, exist_ok=True)
-        processor.save_pretrained(pd_)
-
     train_ds, _, _ = build_qa_dataset(args.qa_roots, args.train_split, args.max_train_samples,
                                        audio_search_roots=args.audio_roots)
+    tsr = getattr(args, "train_subset_ratio", None)
+    if tsr is not None and 0.0 < tsr < 1.0:
+        full_n = len(train_ds)
+        sub_idx = sample_subset_indices(full_n, tsr, args.seed, 0)
+        train_ds = Subset(train_ds, sub_idx)
+        rank0_print(f"[train_subset_ratio={tsr}] spatial train {full_n:,} -> {len(train_ds):,}")
     valid_ds, _, _ = build_qa_dataset(args.qa_roots, args.valid_split, args.max_valid_samples,
                                        audio_search_roots=args.audio_roots)
     if args.mixed_spatial_replay:
@@ -1740,16 +2032,27 @@ def main():
         replay_ds, _, _ = build_qa_dataset(
             args.replay_qa_roots, args.replay_train_split, args.max_train_samples,
             audio_search_roots=args.audio_roots,
+            max_text_chars=args.replay_max_text_chars or None,
         )
-        train_ds = RatioMixedDataset(
-            TaggedDataset(train_ds, has_spatial=True),
-            TaggedDataset(replay_ds, has_spatial=False),
-            spatial_per_replay=args.spatial_replay_ratio,
-        )
-        rank0_print(
-            f"Mixed replay dataset enabled: spatial:replay={args.spatial_replay_ratio}:1 "
-            f"mixed_train_len={len(train_ds):,}"
-        )
+        if args.mix_full_replay:
+            train_ds = ConcatDataset([
+                TaggedDataset(train_ds, has_spatial=True),
+                TaggedDataset(replay_ds, has_spatial=False),
+            ])
+            rank0_print(
+                "[mixed_full_replay] spatial+replay concatenated: "
+                f"mixed_train_len={len(train_ds):,} (shuffled sampler mixes batches)"
+            )
+        else:
+            train_ds = RatioMixedDataset(
+                TaggedDataset(train_ds, has_spatial=True),
+                TaggedDataset(replay_ds, has_spatial=False),
+                spatial_per_replay=args.spatial_replay_ratio,
+            )
+            rank0_print(
+                f"Mixed replay dataset enabled: spatial:replay={args.spatial_replay_ratio}:1 "
+                f"mixed_train_len={len(train_ds):,}"
+            )
     sampler = DistributedSampler(train_ds, shuffle=True) if args.distributed else None
     train_loader = make_loader(
         train_ds,
@@ -1758,6 +2061,10 @@ def main():
             audio_feature_cache=None if args.mixed_spatial_replay else audio_feature_cache,
             include_generation_inputs=False,
             enable_mono_replay=args.mixed_spatial_replay,
+            oss_config=args.oss_config,
+            oss_cache_dir=args.oss_cache_dir,
+            oss_read_retries=args.oss_read_retries,
+            oss_connect_timeout=args.oss_connect_timeout,
         ),
         args.batch_size, args.num_workers, True, sampler,
         args.persistent_workers, args.prefetch_factor,
@@ -1767,6 +2074,14 @@ def main():
                 f" | world={get_world_size()} mode={args.train_mode}")
 
     model = build_model(args, processor)
+    if is_main_process():
+        # Qwen3 model construction synchronizes the Processor's spatial token
+        # rate, projector, max-duration, and token IDs. Persist only after that
+        # synchronization so a restored Processor reproduces placeholder
+        # lengths for non-default projector settings.
+        processor_dir = os.path.join(args.output_dir, "processor")
+        os.makedirs(processor_dir, exist_ok=True)
+        processor.save_pretrained(processor_dir)
     lora_targets = []
     if args.mixed_spatial_replay:
         # Replay path runs on top of the user-selected train_mode (e.g. stage3
@@ -1921,6 +2236,11 @@ def main():
             optimizer_step_per_batch=args.optimizer_step_per_batch,
             writer=writer, global_step_start=gms, global_optimizer_step_start=gos,
             on_optimizer_step=on_optimizer_step,
+            mem_log_interval=args.mem_log_interval,
+            mem_log_path=(
+                os.path.join(args.output_dir, f"gpu_mem_log.rank{get_rank()}.jsonl")
+                if args.mem_log_interval > 0 else None
+            ),
         )
         gms += int(ts["micro_steps"]); gos += int(ts["optimizer_steps"])
         # ----------------------------------------------------------------

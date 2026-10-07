@@ -30,6 +30,11 @@ if os.path.isdir(BEATS_REPO):
 
 import torch
 
+try:
+    import pytest
+except ImportError:  # Standalone execution does not require pytest.
+    pytest = None
+
 # Resolve the encoder checkpoint. Priority: env var SO_ENCODER_CKPT,
 # then a conventional path under the BEATs repo. When neither exists the
 # encoder-forward tests are skipped (not failed).
@@ -57,22 +62,37 @@ def report(name, passed, detail=""):
     print(msg)
 
 
-def test_encoder_single_clip():
+def _build_wrapper():
+    if not os.path.exists(CHECKPOINT_PATH):
+        message = f"no SO-Encoder checkpoint at {CHECKPOINT_PATH}; set SO_ENCODER_CKPT"
+        if pytest is not None:
+            pytest.skip(message)
+        raise FileNotFoundError(message)
+    from spatial_omni.modules.so_encoder import SOEncoder
+
+    enc = SOEncoder(
+        checkpoint_path=CHECKPOINT_PATH, beats_repo_path=BEATS_REPO,
+        freeze_backbone=True, max_audio_seconds=20.0,
+        encoder_token_rate=ENCODER_TOKEN_RATE,
+    )
+    enc._build_model()
+    return enc
+
+
+if pytest is not None:
+    @pytest.fixture(scope="module")
+    def wrapper():
+        return _build_wrapper()
+
+
+def test_encoder_single_clip(wrapper):
     """Single 10s FOA clip → ``round(10 * encoder_token_rate)`` tokens.
 
     The encoder's native frame rate is read from the loaded checkpoint
     (``cfg.target_token_rate``) so this test works for any preset (e.g. 10 Hz
     native + projector pixel-shuffle, or 2.5 Hz native with no shuffle).
     """
-    from spatial_omni.modules.so_encoder import (
-        SOEncoder, SOEncoderOutput,
-    )
-    wrapper = SOEncoder(
-        checkpoint_path=CHECKPOINT_PATH, beats_repo_path=BEATS_REPO,
-        freeze_backbone=True, max_audio_seconds=20.0,
-        encoder_token_rate=ENCODER_TOKEN_RATE,
-    )
-    wrapper._build_model()
+    from spatial_omni.modules.so_encoder import SOEncoderOutput
     # The actual emitted rate is the loaded checkpoint's ``target_token_rate``
     # (the constructor arg is just a hint). Read it back so this test works
     # for any preset (10 Hz native, 2.5 Hz native, ...).
@@ -90,7 +110,6 @@ def test_encoder_single_clip():
     assert out.spatial_token_lengths[0].item() == expected_tokens
     report(f"encoder_single_clip_{native_rate:g}hz", True,
            f"shape={list(out.spatial_tokens.shape)}, length={out.spatial_token_lengths.tolist()}")
-    return wrapper
 
 
 def test_encoder_variable_batch(wrapper):
@@ -238,7 +257,8 @@ if __name__ == "__main__":
             print(f"[SKIP] {name} -- {m}")
     else:
         try:
-            wrapper = test_encoder_single_clip()
+            wrapper = _build_wrapper()
+            test_encoder_single_clip(wrapper)
         except Exception as e:
             report("encoder_single_clip_10hz", False, f"{e}")
             traceback.print_exc()

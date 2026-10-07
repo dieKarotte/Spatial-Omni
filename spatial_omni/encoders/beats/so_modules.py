@@ -1,8 +1,4 @@
-"""Building blocks for the simplified Spatial-BEATs architecture.
-
-This file only defines module interfaces and shape contracts.
-Implementation details are intentionally left as TODOs so the shape flow
-can be reviewed before adding the actual logic.
+"""Spatial feature extraction and projection modules for SO-Encoder.
 """
 
 from dataclasses import dataclass

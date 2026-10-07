@@ -1,4 +1,39 @@
-"""Generate SO-Bench predictions with stable QA identifiers. See docs/evaluation.md for scoring."""
+"""Generate test-split predictions for Spatial-Omni checkpoints.
+
+This script is **generation-only**. It loads one or more trained checkpoints,
+runs inference on a QA split (default: `test`), and writes `predictions.jsonl`
+per checkpoint. It does NOT compute task-aware metrics — use
+`scripts/score_test_predictions.py` separately on the emitted
+`predictions.jsonl`.
+
+Why split into two scripts:
+    * Inference requires GPUs, heavy dependencies (transformers + PEFT),
+      DDP, model-specific collators, and is expensive.
+    * Scoring is CPU-only, deterministic, fast, and can optionally call
+      the OpenAI-compatible LLM judge. Separating it lets you re-score
+      the same predictions with different thresholds / with/without LLM
+      judge / on different metric subsets, at zero GPU cost.
+
+Usage (single checkpoint):
+    torchrun --nproc_per_node=8 scripts/bench_test_generate.py \\
+        --checkpoint-paths runs/so_7b/stage2_encoder_lora/checkpoints/best_trainable.pt \\
+        --qa-root /path/to/SO-Dataset/qa \\
+        --split test \\
+        --batch-size 1 --num-workers 4 \\
+        --output-dir runs/so_7b/stage2_encoder_lora/bench/test
+
+Usage (multiple checkpoints):
+    torchrun --nproc_per_node=8 scripts/bench_test_generate.py \\
+        --run-dir runs/so_7b/stage2_encoder_lora \\
+        --checkpoint-glob 'step_01[0-9]000_trainable.pt' \\
+        --qa-root /path/to/SO-Dataset/qa --split test
+
+After this emits `predictions.jsonl`, score with:
+    python scripts/score_test_predictions.py \\
+        --predictions-jsonl .../predictions.jsonl \\
+        --qa-root /path/to/SO-Dataset/qa --split test \\
+        --llm-judge --llm-concurrency 8
+"""
 
 from __future__ import annotations
 
@@ -31,6 +66,7 @@ from scripts.batch_bench_so_qa import (  # type: ignore  # noqa: E402
 from train_so_qa import (  # type: ignore  # noqa: E402
     DEFAULT_OUTPUT_DIR,
     DEFAULT_QA_ROOT,
+    SAMPLE_RATE,
     QwenAudioFeatureCache,
     build_qa_dataset,
     cleanup_distributed,
@@ -216,10 +252,12 @@ def parse_args() -> argparse.Namespace:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--model-id", default=None, help="Local base-model directory or Hub model ID.")
-    p.add_argument("--beats-checkpoint", default=None, help="Override the SO-Encoder checkpoint.")
-    p.add_argument("--attn-impl", default=None, choices=("auto", "sdpa", "eager", "flash_attention_2"))
     # Checkpoint selection (same options as batch_bench, one of them required).
+    p.add_argument("--model-id", default=None, help="Override the base model directory.")
+    p.add_argument("--beats-checkpoint", default=None, help="Override the SO-Encoder checkpoint.")
+    p.add_argument("--attn-impl", choices=("auto", "sdpa", "eager", "flash_attention_2"), default=None)
+    p.add_argument("--trust-checkpoint", action="store_true",
+                        help="Allow custom pickle classes in a trusted legacy training checkpoint.")
     p.add_argument("--run-dir", type=str, default=DEFAULT_OUTPUT_DIR,
                     help="Only used as prefix for --checkpoint-tags / --checkpoint-glob.")
     p.add_argument("--checkpoint-tags", nargs="+", default=None,
@@ -271,6 +309,10 @@ def parse_args() -> argparse.Namespace:
                     help="Detect-source answers can be long; bump this if you see truncation.")
     p.add_argument("--num-beams", type=int, default=1)
     p.add_argument("--do-sample", action="store_true")
+    p.add_argument("--max-audio-seconds", type=float, default=None,
+                    help="Override the training-side 20s audio truncation cap "
+                         "(e.g. 60 for MMAU-Pro long clips). Default keeps the "
+                         "training contract (MAX_AUDIO_SECONDS=20).")
 
     # Spatial ablation (diagnostic).
     p.add_argument("--spatial-ablation", type=str, default="none",
@@ -397,13 +439,20 @@ def main() -> int:
             )
         # All ranks finish the old-output check before any rank can create a shard.
         distributed_barrier()
-        model, processor, train_args, checkpoint, load_result = \
+        model, processor, train_args, checkpoint, load_result, load_diagnostics = \
             instantiate_model_for_checkpoint(args, checkpoint_path)
         rank0_print(
             f"[bench] {ckpt_name}: loaded "
-            f"missing={len(load_result.missing_keys)} "
-            f"unexpected={len(load_result.unexpected_keys)}"
+            f"loaded_keys={load_diagnostics['loaded_keys']} "
+            f"missing_total={load_diagnostics['missing_total']} "
+            f"missing_trainable={load_diagnostics['missing_trainable']} "
+            f"unexpected={load_diagnostics['unexpected_total']}"
         )
+        if load_diagnostics["missing_trainable"]:
+            rank0_print(
+                f"[bench] WARNING: missing trainable keys examples: "
+                f"{load_diagnostics['missing_trainable_examples']}"
+            )
         thinker_config = getattr(getattr(unwrap_model(model), "thinker"), "config")
         text_config = getattr(thinker_config, "text_config", None)
         zero_projected_spatial_dim = int(
@@ -419,6 +468,10 @@ def main() -> int:
                 mono_audio_w_channel_spatial_encoder=args.mono_audio_w_channel_spatial_encoder,
                 zero_projected_spatial_dim=zero_projected_spatial_dim,
                 drop_mono_audio=args.drop_mono_audio,
+                **(
+                    {"max_audio_samples": int(args.max_audio_seconds * SAMPLE_RATE)}
+                    if args.max_audio_seconds is not None else {}
+                ),
             ),
             batch_size=args.batch_size,
             num_workers=args.num_workers,

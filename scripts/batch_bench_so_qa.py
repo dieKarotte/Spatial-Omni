@@ -30,6 +30,7 @@ from train_so_qa import (
     build_left_padded_batch,
     build_model,
     build_processor,
+    build_qa_text_parts,
     build_qa_dataset,
     cleanup_distributed,
     configure_beats_lora_training,
@@ -61,9 +62,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Batch benchmark Spatial-BEATs Spatial-Omni checkpoints on a QA split."
     )
-    parser.add_argument("--model-id", default=None, help="Local base-model directory or Hub model ID.")
+    parser.add_argument("--model-id", default=None, help="Override the base model directory.")
     parser.add_argument("--beats-checkpoint", default=None, help="Override the SO-Encoder checkpoint.")
-    parser.add_argument("--attn-impl", default=None, choices=("auto", "sdpa", "eager", "flash_attention_2"))
+    parser.add_argument("--attn-impl", choices=("auto", "sdpa", "eager", "flash_attention_2"), default=None)
+    parser.add_argument("--trust-checkpoint", action="store_true",
+                        help="Allow custom pickle classes in a trusted legacy training checkpoint.")
     parser.add_argument("--run-dir", type=str, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--checkpoint-tags", nargs="+", default=None,
                         help="Checkpoint tags without the _trainable.pt suffix, e.g. best epoch_001 step_0007000")
@@ -182,19 +185,36 @@ def build_eval_model_args(runtime_args: argparse.Namespace, train_args: Dict[str
     merged["device"] = runtime_args.device
     merged["device_map"] = getattr(runtime_args, "device_map", None)
     merged["dtype"] = runtime_args.dtype
+    merged["gradient_checkpointing"] = False
     if getattr(runtime_args, "attn_impl", None):
         merged["attn_impl"] = runtime_args.attn_impl
-    merged["gradient_checkpointing"] = False
     merged["projector_fp32"] = bool(train_args.get("projector_fp32", False))
     return argparse.Namespace(**merged)
+
+
+def validate_benchmark_checkpoint_load(load_result, trainable_keys):
+    """Reject benchmarks that did not restore every adaptation tensor."""
+
+    missing_trainable = [
+        key for key in load_result.missing_keys
+        if key in trainable_keys
+    ]
+    unexpected = list(load_result.unexpected_keys)
+    if missing_trainable or unexpected:
+        raise RuntimeError(
+            "Benchmark checkpoint did not restore all adaptation weights: "
+            f"missing_trainable={missing_trainable[:20]} "
+            f"unexpected={unexpected[:20]}"
+        )
+    return missing_trainable
 
 
 def instantiate_model_for_checkpoint(runtime_args: argparse.Namespace, checkpoint_path: str):
     from spatial_omni.utils.release import load_release_settings, load_release_state
     train_args = load_release_settings(
         checkpoint_path,
-        model_id=getattr(runtime_args, "model_id", None) or os.environ.get("SO_BASE_MODEL"),
-        encoder_checkpoint=getattr(runtime_args, "beats_checkpoint", None) or os.environ.get("SO_ENCODER_CKPT"),
+        model_id=getattr(runtime_args, "model_id", None),
+        encoder_checkpoint=getattr(runtime_args, "beats_checkpoint", None),
     )
     model_args = build_eval_model_args(runtime_args, train_args)
     processor = build_processor(model_args.model_id, model_args.so_repo)
@@ -211,15 +231,33 @@ def instantiate_model_for_checkpoint(runtime_args: argparse.Namespace, checkpoin
         model, _ = apply_llm_lora(model, model_args)
         configure_beats_lora_training(model, model_args)
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    # Legacy training bundles can contain custom pickle classes. Only load
+    # those when the caller explicitly trusts the checkpoint's origin.
+    checkpoint = torch.load(
+        checkpoint_path, map_location="cpu",
+        weights_only=not getattr(runtime_args, "trust_checkpoint", False),
+    )
     from spatial_omni.utils.ckpt_compat import remap_legacy_state_dict
     state_dict = checkpoint.get("trainable_state_dict", checkpoint)
     state_dict = remap_legacy_state_dict(state_dict)
-    from train_so_qa import align_peft_prefix
-    state_dict = align_peft_prefix(state_dict, model)
     load_result = load_release_state(model, state_dict)
+    trainable_keys = {
+        name for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+    missing_trainable = validate_benchmark_checkpoint_load(
+        load_result=load_result,
+        trainable_keys=trainable_keys,
+    )
+    load_diagnostics = {
+        "loaded_keys": len(state_dict),
+        "missing_total": len(load_result.missing_keys),
+        "missing_trainable": len(missing_trainable),
+        "missing_trainable_examples": missing_trainable[:20],
+        "unexpected_total": len(load_result.unexpected_keys),
+    }
     model.eval()
-    return model, processor, train_args, checkpoint, load_result
+    return model, processor, train_args, checkpoint, load_result, load_diagnostics
 
 
 @dataclass
@@ -355,11 +393,13 @@ class SpatialBeatsEvalCollator:
                 audio_arrs.append(np.zeros_like(real_wav, dtype=np.float32))
             else:
                 audio_arrs.append(real_wav)
-            # Prompt structure is unchanged: <|AUDIO|><|spatial|>\n<prompt>\n
-            prompt_prefix = (
-                self.processor.audio_token
-                + self.processor.spatial_token
-                + f"\n{str(feat['prompt']).rstrip()}\n"
+            # Keep generation prompts byte-compatible with each model's
+            # training collator. Qwen3 adds chat role boundaries here, while
+            # the legacy 7B processor retains its original token prefix.
+            prompt_prefix, _ = build_qa_text_parts(
+                processor=self.processor,
+                prompt=feat["prompt"],
+                answer="",
             )
             prompts.append(prompt_prefix)
             pid = feat.get("pair_id") or feat.get("qa_id")
@@ -682,7 +722,7 @@ def main() -> None:
             )
         # All ranks finish the old-output check before any rank can create a shard.
         distributed_barrier()
-        model, processor, train_args, checkpoint, load_result = instantiate_model_for_checkpoint(args, checkpoint_path)
+        model, processor, train_args, checkpoint, load_result, load_diagnostics = instantiate_model_for_checkpoint(args, checkpoint_path)
         rank0_print(
             f"[{checkpoint_name}] loaded missing={len(load_result.missing_keys)} "
             f"unexpected={len(load_result.unexpected_keys)}"
