@@ -114,8 +114,8 @@ class _BaseSimpleSpatialAdapter(nn.Module):
                 "IV/Neural-IV spatial baselines require either `spatial_audio` "
                 "or pre-computed `seld_features`."
             )
-        # Keep feature extraction in fp32 and retain gradient tracking
-        # through the bridge and downstream adapter.
+        # Keep feature extraction in fp32 and preserve gradient tracking
+        # through the bridge and downstream spatial adapter.
         with torch.autocast(device_type=spatial_audio.device.type, enabled=False):
             fb_out = self.feature_bridge(
                 spatial_audio=spatial_audio.to(dtype=torch.float32),
