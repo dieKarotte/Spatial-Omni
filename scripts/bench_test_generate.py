@@ -1,39 +1,4 @@
-"""Generate test-split predictions for Spatial-Omni checkpoints.
-
-This script is **generation-only**. It loads one or more trained checkpoints,
-runs inference on a QA split (default: `test`), and writes `predictions.jsonl`
-per checkpoint. It does NOT compute task-aware metrics — use
-`scripts/score_test_predictions.py` separately on the emitted
-`predictions.jsonl`.
-
-Why split into two scripts:
-    * Inference requires GPUs, heavy dependencies (transformers + PEFT),
-      DDP, model-specific collators, and is expensive.
-    * Scoring is CPU-only, deterministic, fast, and can optionally call
-      the OpenAI-compatible LLM judge. Separating it lets you re-score
-      the same predictions with different thresholds / with/without LLM
-      judge / on different metric subsets, at zero GPU cost.
-
-Usage (single checkpoint):
-    torchrun --nproc_per_node=8 scripts/bench_test_generate.py \\
-        --checkpoint-paths runs/so_7b/stage2_encoder_lora/checkpoints/best_trainable.pt \\
-        --qa-root /path/to/SO-Dataset/qa \\
-        --split test \\
-        --batch-size 1 --num-workers 4 \\
-        --output-dir runs/so_7b/stage2_encoder_lora/bench/test
-
-Usage (multiple checkpoints):
-    torchrun --nproc_per_node=8 scripts/bench_test_generate.py \\
-        --run-dir runs/so_7b/stage2_encoder_lora \\
-        --checkpoint-glob 'step_01[0-9]000_trainable.pt' \\
-        --qa-root /path/to/SO-Dataset/qa --split test
-
-After this emits `predictions.jsonl`, score with:
-    python scripts/score_test_predictions.py \\
-        --predictions-jsonl .../predictions.jsonl \\
-        --qa-root /path/to/SO-Dataset/qa --split test \\
-        --llm-judge --llm-concurrency 8
-"""
+"""Generate SO-Bench predictions with stable QA identifiers. See docs/evaluation.md for scoring."""
 
 from __future__ import annotations
 
@@ -175,7 +140,7 @@ def run_generation_bench_with_ablation(
     eval_model = unwrap_model(model)
     input_device = get_model_device(eval_model)
 
-    with open(shard_output_path, "w", encoding="utf-8") as handle:
+    with open(shard_output_path, "x", encoding="utf-8") as handle:
         with torch.no_grad():
             progress = tqdm(loader, desc=bench_name, leave=False,
                             disable=not is_main_process())
@@ -202,6 +167,7 @@ def run_generation_bench_with_ablation(
                     raw_em = int(normalize_answer(prediction_text) == normalize_answer(answer_text))
                     cln_em = int(normalize_answer(cleaned_prediction) == normalize_answer(cleaned_answer))
                     record = {
+                        "qa_id": meta.get("qa_id"),
                         "pair_id": meta.get("pair_id"),
                         "task_name": meta.get("task_name"),
                         "question": meta.get("question"),
@@ -250,6 +216,9 @@ def parse_args() -> argparse.Namespace:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    p.add_argument("--model-id", default=None, help="Local base-model directory or Hub model ID.")
+    p.add_argument("--beats-checkpoint", default=None, help="Override the SO-Encoder checkpoint.")
+    p.add_argument("--attn-impl", default=None, choices=("auto", "sdpa", "eager", "flash_attention_2"))
     # Checkpoint selection (same options as batch_bench, one of them required).
     p.add_argument("--run-dir", type=str, default=DEFAULT_OUTPUT_DIR,
                     help="Only used as prefix for --checkpoint-tags / --checkpoint-glob.")
@@ -420,6 +389,14 @@ def main() -> int:
             continue
 
         rank0_print(f"\n[bench] === {ckpt_name} ===")
+        existing_predictions = list(Path(predictions_jsonl).parent.glob("predictions.jsonl*"))
+        if existing_predictions:
+            raise FileExistsError(
+                f"Prediction output already exists: {existing_predictions[0]}. "
+                "Use a new --output-dir, or --skip-existing for completed predictions."
+            )
+        # All ranks finish the old-output check before any rank can create a shard.
+        distributed_barrier()
         model, processor, train_args, checkpoint, load_result = \
             instantiate_model_for_checkpoint(args, checkpoint_path)
         rank0_print(
@@ -498,7 +475,7 @@ def main() -> int:
             json.dump(summary, handle, indent=2, sort_keys=True, ensure_ascii=False)
         rank0_print(f"[bench] wrote {summary_path}")
         rank0_print(
-            "[bench] Next step: run `scripts/score_test_predictions.py` "
+            "[bench] Next step: run `scripts/score_sobench.py` "
             "on each predictions.jsonl to get task-aware metrics + LLM judge."
         )
 

@@ -61,6 +61,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Batch benchmark Spatial-BEATs Spatial-Omni checkpoints on a QA split."
     )
+    parser.add_argument("--model-id", default=None, help="Local base-model directory or Hub model ID.")
+    parser.add_argument("--beats-checkpoint", default=None, help="Override the SO-Encoder checkpoint.")
+    parser.add_argument("--attn-impl", default=None, choices=("auto", "sdpa", "eager", "flash_attention_2"))
     parser.add_argument("--run-dir", type=str, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--checkpoint-tags", nargs="+", default=None,
                         help="Checkpoint tags without the _trainable.pt suffix, e.g. best epoch_001 step_0007000")
@@ -179,13 +182,20 @@ def build_eval_model_args(runtime_args: argparse.Namespace, train_args: Dict[str
     merged["device"] = runtime_args.device
     merged["device_map"] = getattr(runtime_args, "device_map", None)
     merged["dtype"] = runtime_args.dtype
+    if getattr(runtime_args, "attn_impl", None):
+        merged["attn_impl"] = runtime_args.attn_impl
     merged["gradient_checkpointing"] = False
     merged["projector_fp32"] = bool(train_args.get("projector_fp32", False))
     return argparse.Namespace(**merged)
 
 
 def instantiate_model_for_checkpoint(runtime_args: argparse.Namespace, checkpoint_path: str):
-    train_args = load_json(infer_train_args_path(checkpoint_path))
+    from spatial_omni.utils.release import load_release_settings, load_release_state
+    train_args = load_release_settings(
+        checkpoint_path,
+        model_id=getattr(runtime_args, "model_id", None) or os.environ.get("SO_BASE_MODEL"),
+        encoder_checkpoint=getattr(runtime_args, "beats_checkpoint", None) or os.environ.get("SO_ENCODER_CKPT"),
+    )
     model_args = build_eval_model_args(runtime_args, train_args)
     processor = build_processor(model_args.model_id, model_args.so_repo)
     processor.tokenizer.padding_side = "left"
@@ -201,11 +211,13 @@ def instantiate_model_for_checkpoint(runtime_args: argparse.Namespace, checkpoin
         model, _ = apply_llm_lora(model, model_args)
         configure_beats_lora_training(model, model_args)
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     from spatial_omni.utils.ckpt_compat import remap_legacy_state_dict
     state_dict = checkpoint.get("trainable_state_dict", checkpoint)
     state_dict = remap_legacy_state_dict(state_dict)
-    load_result = model.load_state_dict(state_dict, strict=False)
+    from train_so_qa import align_peft_prefix
+    state_dict = align_peft_prefix(state_dict, model)
+    load_result = load_release_state(model, state_dict)
     model.eval()
     return model, processor, train_args, checkpoint, load_result
 
@@ -219,7 +231,7 @@ class SpatialBeatsEvalCollator:
     mono_audio_zero_spatial_tokens: bool = False
     mono_audio_w_channel_spatial_encoder: bool = False
     zero_projected_spatial_dim: int = 3584
-    # NEW: "decoder-only" ablation — drop the Qwen mono <|AUDIO|> branch
+    # "decoder-only" ablation — drop the Qwen mono <|AUDIO|> branch
     # entirely; spatial encoder keeps producing real <|spatial|> tokens.
     # Use this to measure how much of the model's QA performance comes
     # from Qwen's untrained audio_tower vs the spatial encoder. The model
@@ -350,7 +362,7 @@ class SpatialBeatsEvalCollator:
                 + f"\n{str(feat['prompt']).rstrip()}\n"
             )
             prompts.append(prompt_prefix)
-            pid = feat.get("pair_id")
+            pid = feat.get("pair_id") or feat.get("qa_id")
             if pid is None or pid == "":
                 import hashlib
                 key = "|".join(
@@ -360,6 +372,7 @@ class SpatialBeatsEvalCollator:
                 pid = "auto_" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
             meta.append(
                 {
+                    "qa_id": feat.get("qa_id"),
                     "pair_id": pid,
                     "task_name": feat.get("task_name"),
                     "question": feat.get("question"),
@@ -505,7 +518,7 @@ def finalize_distributed_prediction_file(output_jsonl_path: str) -> List[Dict[st
     else:
         shard_paths = [f"{output_jsonl_path}.rank0.jsonl"]
     merged_records: List[Dict[str, Any]] = []
-    with open(output_jsonl_path, "w", encoding="utf-8") as merged_handle:
+    with open(output_jsonl_path, "x", encoding="utf-8") as merged_handle:
         for shard_path in shard_paths:
             if not os.path.exists(shard_path):
                 continue
@@ -541,7 +554,7 @@ def run_generation_bench(
     # device_map='auto' 时模型分布在多卡，取第一个参数的实际 device 作为输入 tensor 的目标
     input_device = get_model_device(eval_model)
 
-    with open(shard_output_path, "w", encoding="utf-8") as handle:
+    with open(shard_output_path, "x", encoding="utf-8") as handle:
         with torch.no_grad():
             progress = tqdm(loader, desc=bench_name, leave=False, disable=not is_main_process())
             for batch in progress:
@@ -567,6 +580,7 @@ def run_generation_bench(
                     raw_exact_match = int(normalize_answer(prediction_text) == normalize_answer(answer_text))
                     cleaned_exact_match = int(normalize_answer(cleaned_prediction) == normalize_answer(cleaned_answer))
                     record = {
+                        "qa_id": meta.get("qa_id"),
                         "pair_id": meta.get("pair_id"),
                         "task_name": meta.get("task_name"),
                         "question": meta.get("question"),
@@ -660,6 +674,14 @@ def main() -> None:
                 })
             continue
 
+        existing_predictions = list(Path(predictions_jsonl).parent.glob("predictions.jsonl*"))
+        if existing_predictions:
+            raise FileExistsError(
+                f"Prediction output already exists: {existing_predictions[0]}. "
+                "Use a new --output-dir, or --skip-existing for completed predictions."
+            )
+        # All ranks finish the old-output check before any rank can create a shard.
+        distributed_barrier()
         model, processor, train_args, checkpoint, load_result = instantiate_model_for_checkpoint(args, checkpoint_path)
         rank0_print(
             f"[{checkpoint_name}] loaded missing={len(load_result.missing_keys)} "

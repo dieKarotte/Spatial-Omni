@@ -368,7 +368,6 @@ def compute_gammatone_features(audio, sample_rate=16000, num_bands=20, low_freq=
     # plt.ylabel('Frequency Dimension')
     # plt.title('Feature Representation')
     # # Save the figure with high resolution
-    # plt.savefig('/home/hmeng/git/ambisonic-acoustic-estimaton/CNN_Volume_feature_representation.png', dpi=300, bbox_inches='tight')
     # plt.show()
 
     return log_energy_combined

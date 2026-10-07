@@ -1,9 +1,4 @@
-"""Training skeleton for the simplified Spatial-BEATs pipeline.
-
-This file defines the stage-1 encoder-only training interfaces and the expected
-hand-off between dataset, model, and loss modules. Actual optimization and
-training logic is intentionally left unimplemented.
-"""
+"""Train and evaluate the SO-Encoder with spatial audio supervision."""
 
 import argparse
 import contextlib
@@ -192,7 +187,7 @@ def _unwrap_model(model: nn.Module) -> nn.Module:
 
 
 class EMAModel:
-    """[D-6] Exponential moving average of model parameters.
+    """Exponential moving average of model parameters.
 
     Maintains a shadow copy of trainable parameters and updates it after each
     optimizer step:
@@ -326,11 +321,11 @@ class TrainSOBackboneConfig:
     # start local_spatial_encoder/fusion/aux-head weights.
     init_from_spatial_ckpt: str = ""
     # Optional path to a BEATs-trunk-only fine-tune checkpoint produced by
-    # ``train_beats_multilabel_trunk.py``. The checkpoint is expected to
+    # trunk fine-tuning. The checkpoint is expected to
     # contain a ``beats_only`` key whose state-dict has the ``beats.``
     # prefix already stripped (i.e. keys look like ``encoder.layers.0...``).
     # When set, it overrides the AS2M trunk AFTER ``load_beats_pretrained``
-    # runs.  This is the v13_F hot-start route: multi-label trunk → spatial.
+    # runs.  This is the hot-start route: multi-label trunk → spatial.
     trunk_finetuned_ckpt: str = ""
 
     batch_size: int = 32
@@ -422,7 +417,7 @@ class TrainSOBackboneConfig:
     distributed_backend: str = "nccl"
     ddp_find_unused_parameters: bool = False
 
-    # === v13_D [D-6]: Exponential Moving Average of model weights ==========
+    # === Exponential Moving Average of model weights ==========
     # When use_ema=True, a shadow copy of trainable weights is maintained
     # with decay ``ema_decay``. Validation / best.pt save uses the EMA
     # weights; training continues with the live weights. ema_start_epoch
@@ -431,7 +426,7 @@ class TrainSOBackboneConfig:
     ema_decay: float = 0.9995
     ema_start_epoch: int = 3
 
-    # === v13_D [D-1]: Cosine LR schedule ===================================
+    # === Cosine LR schedule ===================================
     # When use_cosine_lr=True, LR follows:
     #   - linear warmup from 0 → peak over first ``cosine_lr_warmup_epochs`` eps
     #   - cosine decay from peak → peak * cosine_lr_min_ratio over remaining
@@ -2045,10 +2040,7 @@ def parse_args() -> argparse.Namespace:
         "--trunk-finetuned-ckpt",
         type=str,
         default=None,
-        help="Optional path to a BEATs trunk-only fine-tune checkpoint "
-        "(produced by train_beats_multilabel_trunk.py) to hot-start the "
-        "trunk. Loaded after load_beats_pretrained; keys under 'beats_only' "
-        "are copied over the AS2M baseline where shapes match.",
+        help='Optional BEATs trunk checkpoint containing a beats_only state dictionary. Loaded after the base trunk initialization.',
     )
     parser.add_argument(
         "--init-from-spatial-ckpt",
@@ -2380,7 +2372,7 @@ def train_one_epoch(
             )
         loss_output.loss_total.backward()
         optimizer.step()
-        # v13_D [D-6]: update EMA shadow after each optimizer step
+        # update EMA shadow after each optimizer step
         if ema_model is not None:
             ema_model.update(model)
 
@@ -2538,7 +2530,7 @@ def evaluate_one_epoch(
                         temporal_padding_mask=model_output.temporal_padding_mask,
                         accumulator=seld_acc,
                         activity_threshold=0.5,
-                        # v13_E: OR top-K̂ gate into the SELD evaluator when
+                        # OR top-K̂ gate into the SELD evaluator when
                         # the num_active head is enabled in loss supervision.
                         use_num_active_gate=bool(
                             getattr(train_cfg.loss, "lambda_frame_num_active", 0.0) > 0.0
@@ -2856,7 +2848,7 @@ def main(train_cfg: Optional[TrainSOBackboneConfig] = None) -> None:
                 f"at epoch {start_epoch} with best {train_cfg.best_metric_name}={best_metric_value}"
             )
 
-        # v13_D [D-6]: EMA shadow weights (created lazily so the model is
+        # EMA shadow weights (created lazily so the model is
         # already loaded from resume). Validation / best-checkpoint save use
         # the shadow weights; training continues with the live weights.
         ema_model: Optional["EMAModel"] = None
@@ -2893,7 +2885,7 @@ def main(train_cfg: Optional[TrainSOBackboneConfig] = None) -> None:
                     f"{_class_w:.3f}"
                 )
 
-            # v13_B [B-4] Soft macro-F1 weight warmup.
+            # Soft macro-F1 weight warmup.
             # When frame_soft_f1_warmup_epochs > 0, use
             # frame_soft_f1_weight_warmup for ep < warmup, then
             # frame_soft_f1_weight afterwards.
@@ -2983,7 +2975,7 @@ def main(train_cfg: Optional[TrainSOBackboneConfig] = None) -> None:
                 )
 
             _log(f"[Epoch {epoch}] start")
-            # v13_D [D-1]: cosine LR schedule (optional)
+            # cosine LR schedule (optional)
             if getattr(train_cfg, "use_cosine_lr", False):
                 import math as _math
                 _warmup_eps = max(0, int(getattr(train_cfg, "cosine_lr_warmup_epochs", 0)))
@@ -3013,7 +3005,7 @@ def main(train_cfg: Optional[TrainSOBackboneConfig] = None) -> None:
                     f"[Epoch {epoch}] cosine-LR scale={_lr_scale:.3f}  "
                     f"peak_lr={_peak_lr:.2e}  epoch_lr≈{_new_lr:.2e}"
                 )
-            # v13_D [D-6]: only pass ema_model once epoch reaches ema_start_epoch
+            # only pass ema_model once epoch reaches ema_start_epoch
             # so the shadow is not polluted by cls-warmup noise.
             _active_ema = ema_model if (
                 ema_model is not None
@@ -3031,7 +3023,7 @@ def main(train_cfg: Optional[TrainSOBackboneConfig] = None) -> None:
             val_examples: List[Dict[str, object]] = []
             val_csv_samples: List[Dict[str, object]] = []
             if val_loader is not None:
-                # v13_D [D-6]: swap in EMA shadow for validation (only if EMA
+                # swap in EMA shadow for validation (only if EMA
                 # has been actively updated this run).
                 _ema_backup = None
                 if _active_ema is not None:
@@ -3074,7 +3066,7 @@ def main(train_cfg: Optional[TrainSOBackboneConfig] = None) -> None:
             if is_best:
                 best_metric_value = current_metric_value
 
-            # v13_D [D-6]: checkpoint saving also uses EMA weights when active,
+            # checkpoint saving also uses EMA weights when active,
             # so best.pt / last.pt reflect the validation-time weights.
             _ema_backup2 = None
             if _active_ema is not None:

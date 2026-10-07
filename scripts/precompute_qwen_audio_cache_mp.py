@@ -1,27 +1,9 @@
 #!/usr/bin/env python3
-"""纯 CPU 多进程版 Qwen Whisper mel 特征预计算。
+"""Precompute audio features with a CPU process pool.
 
-相比 `precompute_qwen_audio_cache.py` 的 torchrun 版：
-  - 不占用 GPU（Whisper STFT 在 CPU 上跑本来就够快，CPU 并行是正确方向）
-  - 进程数不受 GPU 卡数限制（192 核机器可以开 64+ 进程）
-  - `multiprocessing.Pool` + `imap_unordered` 负载自动均衡
-  - 预期 8h（单进程版）→ 10~15 分钟
-
-典型用法（398K 条音频，32 进程，约 15 分钟）：
-    python scripts/precompute_qwen_audio_cache_mp.py \\
-        --qa-root /path/to/SO-Dataset/qa \\
-        --splits train valid test \\
-        --cache-dir /path/to/qwen_audio_cache \\
-        --num-procs 32 \\
-        --no-spatial-cache \\
-        --skip-existing
-
-核心设计：
-  - Pool initializer 里每个 worker 加载自己的 Qwen feature_extractor（一次，常驻）
-  - 强制每个 worker `OMP_NUM_THREADS=1`，避免 numpy/MKL 多线程互相抢核
-  - 用 imap_unordered + chunksize=16 降低 IPC 开销
-  - `--skip-existing`：主进程先扫已完成的 .pt，只把真正 TODO 的任务下发给 worker
-  - 中途中断后再跑，加 `--skip-existing` 即可续传
+Each worker initializes its feature extractor once. Use --num-procs to
+set concurrency and --skip-existing to resume a partial cache. The
+--no-spatial-cache option omits FOA waveforms from cache entries.
 """
 
 from __future__ import annotations
@@ -214,8 +196,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-spatial-cache",
         action="store_true",
-        help="不缓存 spatial_audio 原始波形（推荐！原始 20s 4ch fp16 单条 2.5MB × 398K ≈ 1TB，"
-             "不缓存后 cache 仅 ~100GB；训练时 collator 自动 fallback 到 sf.read）。",
+        help='Omit spatial waveforms from cache entries; load them from the source audio during training.',
     )
     parser.add_argument(
         "--skip-existing",

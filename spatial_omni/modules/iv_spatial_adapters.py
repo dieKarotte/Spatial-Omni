@@ -1,16 +1,7 @@
-"""IV 和 Neural-IV spatial encoder baselines.
+"""Intensity-vector and neural-intensity-vector spatial encoders.
 
-从 DCASE2024_seld_baseline（legacy-qwen-2.5-omni/qwen2_5_omni_legacy/modules/
-simple_spatial_adapters.py）迁移而来。两个 baseline 都依赖 `SeldFeatureBridge`
-产出的 7 通道特征（前 4 通道 log-mel，后 3 通道为归一化 intensity vector）。
-
-返回签名:
-    (spatial_tokens [B, T_s, token_dim],
-     spatial_lengths [B])
-与 `SOEncoderOutput` 结构对齐，保证上游 `masked_scatter` 注入逻辑可复用。
-
-Output rate (2.5 Hz spatial token):
-  T_feat → (feature_to_seld_ratio=5) → T_seld → (downsample_factor=4) → T_spat
+The feature bridge supplies four log-mel and three normalized intensity
+channels. Encoders return spatial tokens [B, T, D] and valid lengths [B].
 """
 
 from __future__ import annotations
@@ -123,22 +114,8 @@ class _BaseSimpleSpatialAdapter(nn.Module):
                 "IV/Neural-IV spatial baselines require either `spatial_audio` "
                 "or pre-computed `seld_features`."
             )
-        # Force fp32 for the feature bridge. We used to wrap in torch.no_grad()
-        # here to save memory + avoid cuFFT plan pressure, but that breaks the
-        # autograd chain into the per-sample adapter loop below:
-        #
-        #   iv_features.requires_grad = False (under no_grad)
-        #   spatial_tokens = iv_features.new_zeros(...)  # also requires_grad=False
-        #   spatial_tokens[idx, :n] = self.token_head(...)  # ← in-place assign of
-        #     a grad-requiring RHS into a non-grad LHS. In the outer DDP +
-        #     find_unused_parameters=True + gradient_checkpointing path this
-        #     empirically produces all-NaN grads on the adapter weights at
-        #     step 1 (skip_g ≈ 50-100%). The original (Run 2) configuration
-        #     without no_grad ran clean for 2586 steps before the separate
-        #     cuFFT crash — so the memory-saving no_grad is a net loss.
-        #
-        # The SELD233 bridge itself still has its own autograd-safety guards
-        # inside `_extract_online_features` (and that call also runs fp32).
+        # Keep feature extraction in fp32 and retain gradient tracking
+        # through the bridge and downstream adapter.
         with torch.autocast(device_type=spatial_audio.device.type, enabled=False):
             fb_out = self.feature_bridge(
                 spatial_audio=spatial_audio.to(dtype=torch.float32),

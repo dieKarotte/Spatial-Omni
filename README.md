@@ -1,535 +1,244 @@
-# Spatial-Omni: Spatial Audio Understanding Integration in Multimodal LLMs via FOA Encoding
-<img src="figures/model.png" alt="Spatial-Omni" width="800"/>
+# Spatial-Omni
 
-Recent multimodal large language models mainly process audio as monaural signals, thereby discarding the spatial cues contained in spatial audio for sound localization, spatial relation reasoning, and spatial scene understanding. We propose Spatial-Omni, a lightweight method that implements SO-Encoder to inject First-Order Ambisonics (FOA) spatial audio into existing Omni LLMs as an independent modality, without modifying their original audio encoders. SO-Encoder provides spatial tokens with limited additional context cost and improves spatial audio understanding through efficient staged training. To support training and evaluation, we construct SO-Dataset, SO-QA, and SO-Bench from open-source data, real recordings, and simulations, containing 400K FOA spatial audio clips and 2.1M spatial question answering pairs. SO-Bench covers 16 spatial audio understanding subtasks, including basic detection and location estimation, spatial relation understanding, and complex spatial reasoning. Experiments show that Spatial-Omni outperforms existing open-source Large Audio-Language Models (LALMs) and Omni LLM models on spatial audio understanding tasks while retaining a reasonable level of general audio understanding.
+**Spatial Audio Understanding Integration in Multimodal LLMs via FOA Encoding**
 
-**Spatial audio understanding on top of Qwen2.5-Omni.** Spatial-Omni augments
-the Qwen2.5-Omni LLM with a dedicated spatial encoder (**SO-Encoder**) that
-turns first-order ambisonic (FOA) audio into low-rate spatial tokens, and
-injects them into the LLM via a `<|spatial|>` placeholder.
+[Paper](https://arxiv.org/abs/2606.10738) · [Models](https://huggingface.co/dieKarotte/Spatial-Omni) · [SO-Dataset](https://huggingface.co/datasets/dieKarotte/SO-Dataset) · [SO-Bench](https://huggingface.co/datasets/dieKarotte/SO-Bench)
 
-| Variant | Base LLM        | Spatial encoder | Trainer          |
-|---------|-----------------|-----------------|------------------|
-| SO-7B   | Qwen2.5-Omni-7B | SO-Encoder      | `train_so_qa.py` |
-| SO-30B  | Qwen3-Omni-a30b-Instruct | SO-Encoder      | `train_so_qa_qwen3.py` |
+Spatial-Omni adds spatial audio as an independent modality to audio-language models. A BEATs-based **SO-Encoder** extracts spatial features from four-channel first-order ambisonics (FOA), while the base model retains its native audio encoder. A projector supplies spatial tokens alongside the native audio representation. SO-Encoder emits features at **10 Hz**; the projector produces **2.5 spatial tokens/s**, or 50 tokens for a 20-second clip.
 
-The SO-Encoder is a BEATs-based, spatially-pretrained encoder that emits
-2.5 Hz spatial tokens. (Two baselines also ship for comparison — a DCASE 2024
-SELD backbone and a lightweight intensity-vector path — but the SO-Encoder
-pipeline below is the main, recommended route.)
+We provide SO-Dataset for encoder and QA training and SO-Bench for evaluation across 16 spatial-audio tasks, spanning sound detection, localization, spatial relations, and reasoning. The datasets combine real recordings and simulated scenes; see the [paper](https://arxiv.org/abs/2606.10738) for their construction.
 
-The two evaluation assets are:
+![Spatial-Omni architecture](figures/model.png)
 
-- **[SO-Dataset](https://huggingface.co/datasets/dieKarotte/SO-Dataset)** — FOA SELD audio data with annotation & FOA spatial QA training data.
-- **[SO-Bench](https://huggingface.co/datasets/dieKarotte/SO-Bench)**   — Held-out spatial QA test set.
+[Quick start](#quick-start) · [Data](#data) · [SO-Encoder](#so-encoder) · [Training](#training) · [Evaluation](#evaluation) · [Results](#results)
 
-### Contents
+## Models
 
-1. [Environment](#1-environment) — conda install + env vars
-2. [Data: SO-Dataset / SO-Bench](#2-data-so-dataset--so-bench) — download, extract, schema
-3. [SO-Encoder pretraining & evaluation](#3-so-encoder-pretraining--evaluation) — `train_so_pretrain` + `bench_so_encoder`
-4. [SO-7B QA fine-tuning (3 stages)](#4-so-7b-qa-fine-tuning-3-stages) — `train_so_qa`
-5. [Inference & evaluation on SO-Bench](#5-inference--evaluation-on-so-bench) — `bench_test_generate` + `score_test_predictions`
-6. [Repository layout](#6-repository-layout)
-7. [Citations](#7-citations)
-8. [License](#8-license)
+| Models | Base model | Code | Checkpoints |
+|---|---|---|---|
+| SO-7B / SO-7B-MIX | Qwen2.5-Omni-7B | [main](https://github.com/dieKarotte/Spatial-Omni/tree/main) | [SO](https://huggingface.co/dieKarotte/Spatial-Omni/tree/main/SO-7B/so) / [MIX](https://huggingface.co/dieKarotte/Spatial-Omni/tree/main/SO-7B/mix) |
+| SO-30B / SO-30B-MIX | Qwen3-Omni-30B-A3B-Instruct | [SO-30B](https://github.com/dieKarotte/Spatial-Omni/tree/SO-30B) | Pending |
+| SO-4B / SO-4B-MIX | Phi-4-multimodal | [SO-4B](https://github.com/dieKarotte/Spatial-Omni/tree/SO-4B) | Pending |
+| SO-AF3 / SO-AF3-MIX | Audio Flamingo 3 | [SO-AF3](https://github.com/dieKarotte/Spatial-Omni/tree/SO-AF3) | Pending |
 
-> **SO-30B (Qwen3-Omni-MoE) variant** lives on the `so-30b` branch
-> with its own environment (`environment-so30b.yml`) and trainer
-> (`train_so_qa_qwen3.py`). Check out that branch for the full SO-30B guide.
+[SO-Encoder](https://huggingface.co/dieKarotte/Spatial-Omni/tree/main/SO-Encoder) is also available separately. Adaptation checkpoints contain the trained spatial encoder, projector, and language-model LoRA parameters; the original base model is required. SO-7B-MIX adds mono-audio replay and learned null spatial tokens. Each branch has its own environment and training entrypoints.
 
----
+## Quick start
 
-## 1. Environment
+Use Linux, Python 3.11, and an NVIDIA GPU. The main environment uses PyTorch 2.5.1, Transformers 4.52.0, and PEFT 0.17.1; SDPA works without FlashAttention.
 
-Tested target: **Python 3.11, CUDA 12.4, PyTorch 2.5.1** on NVIDIA A100.
-
-### Install with conda (recommended)
-```bash
+~~~bash
+git clone https://github.com/dieKarotte/Spatial-Omni.git
+cd Spatial-Omni
 conda env create -f environment.yml
 conda activate spatial-omni
-```
 
-This pins every dependency to the exact versions the repo is developed and
-tested against (`transformers==4.52.0`, `peft==0.17.1`, `torch==2.5.1+cu124`,
-etc.). `nvidia-smi` may report a higher CUDA version — that is the driver
-capability; the cu124 wheels run on any driver that is 12.4-capable or newer.
+hf download Qwen/Qwen2.5-Omni-7B --local-dir ckpts/base
+hf download dieKarotte/Spatial-Omni --local-dir ckpts/Spatial-Omni
+export SO_BASE_MODEL="$PWD/ckpts/base"
+export SO_ENCODER_CKPT="$PWD/ckpts/Spatial-Omni/SO-Encoder/SO-Encoder.pt"
+export SO_CHECKPOINT="$PWD/ckpts/Spatial-Omni/SO-7B/so/SO-7B.pt"
+~~~
 
-### Install with pip (alternative)
-```bash
-python3.11 -m venv .venv && source .venv/bin/activate
-pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
-pip install -r requirements.txt
-```
+For an existing Python 3.11 environment, install `torch==2.5.1 torchaudio==2.5.1` from `https://download.pytorch.org/whl/cu124`, then `pip install -r requirements.txt`. Set `HF_ENDPOINT=https://hf-mirror.com` before downloads if a mirror is needed.
 
-> The trainers default to `--attn-impl sdpa`, so **flash-attn is not required**.
-> To enable it for extra speed: `pip install flash-attn==2.8.3 --no-build-isolation`.
+~~~bash
+python scripts/infer.py \
+  --model-id "$SO_BASE_MODEL" --checkpoint "$SO_CHECKPOINT" \
+  --audio /path/to/foa.wav \
+  --question "Where are the sound sources relative to the listener?"
+~~~
 
-### External dependencies (set once via env vars)
+Input must be **four-channel, 16 kHz FOA**, with the released dataset's channel order and W in channel 0. The model uses the first 20 seconds. The inference entrypoint checks the sample rate and channel count; convert other formats explicitly.
 
-The BEATs model code is **vendored** under `spatial_omni/encoders/beats/`,
-so you do **not** need to clone `microsoft/unilm`. Only the trunk weights
-file is needed, and only for SO-Encoder pretraining.
+For MIX, set `SO_CHECKPOINT="$PWD/ckpts/Spatial-Omni/SO-7B/mix/SO-7B-MIX.pt"`. The same command handles FOA; add `--mono` for single-channel 16 kHz audio. Keep the downloaded folder structure: the loader reads the adjacent `train_args.json` and resolves the encoder path. `--beats-checkpoint` overrides it, and `--device-map auto` enables loading across visible GPUs.
 
-```bash
-# 1) HuggingFace base model (REQUIRED for QA fine-tune & bench)
-huggingface-cli download Qwen/Qwen2.5-Omni-7B --local-dir ./Qwen2.5-Omni-7B
-export SO_BASE_MODEL=$PWD/Qwen2.5-Omni-7B
+## Data
 
-# 2) SO-Dataset root (REQUIRED for §2/§3/§4/§5)
-#    Download instructions in §2.
-export SO_DATASET_ROOT=/path/to/SO-Dataset
-export SO_VOCAB=$SO_DATASET_ROOT/so_vocab.csv          # ships with the release
+Download [SO-Dataset](https://huggingface.co/datasets/dieKarotte/SO-Dataset) for training and [SO-Bench](https://huggingface.co/datasets/dieKarotte/SO-Bench) for the **7,877-question** evaluation. They are separate releases; the training dataset's test split is not a substitute for SO-Bench.
 
-# 3) Pretrained SO-Encoder checkpoint (REQUIRED for QA fine-tune & bench)
-#    Either train it yourself via §3.1, or download the released checkpoint.
-export SO_ENCODER_CKPT=/path/to/so_encoder_pretrained.pt
+~~~bash
+hf download dieKarotte/SO-Dataset --repo-type dataset --local-dir data/SO-Dataset
+python scripts/data/extract_so_dataset.py \
+  --src data/SO-Dataset --dst data/SO-Dataset --splits train valid test --workers 4
+hf download dieKarotte/SO-Bench --repo-type dataset --local-dir data/SO-Bench
 
-# 4) (Optional) Upstream BEATs trunk weights — ONLY for SO-Encoder pretraining (§3.1).
-#    QA fine-tune (§4) and bench (§5) do NOT need this.
-#    Download `BEATs_iter3_plus_AS2M.pt` from microsoft/unilm releases:
-#    https://github.com/microsoft/unilm/tree/master/beats
-# export SO_BEATS_TRUNK_CKPT=/path/to/BEATs_iter3_plus_AS2M.pt
+export SO_DATASET_ROOT="$PWD/data/SO-Dataset"
+export SO_BENCH_ROOT="$PWD/data/SO-Bench"
+export SO_VOCAB="$SO_DATASET_ROOT/so_vocab.csv"
+~~~
 
-# 5) (Optional) Repo root for sys.path; auto-detected from the script
-#    location. Set only if you launch trainers from a different cwd.
-# export SO_REPO=$PWD
+The training release contains large audio and annotation shards. Select the required splits on its dataset page before downloading; the extractor supports `--n-shards` and `--dry-run`. Prepare SO-Bench audio according to its dataset card, preserving the paths referenced by its QA records.
 
-# 6) (Optional) DCASE 2024 SELD baseline — vendored under
-#    spatial_omni/encoders/seldnet/, so an external checkout is NOT needed.
-#    Set DCASE_BASELINE_REPO only if you want to use a different fork or
-#    point at an external SELD baseline repo (rarely needed).
-# git clone https://github.com/sharathadavanne/seld-dcase2024.git
-# export DCASE_BASELINE_REPO=$PWD/seld-dcase2024
-# export SELD_FEATURE_STATS_DIR=/path/to/seld_feat_label/...
+~~~text
+data/SO-Dataset/
+  audio/{train,valid,test}/foa_*.wav
+  annotations/{train,valid,test}/foa_*.csv
+  metadata/{train,valid,test}.jsonl
+  qa/{train,valid,test}.jsonl
+  so_vocab.csv
+~~~
 
-# 7) (Optional) SO_BEATS_REPO — legacy sys.path injection for an external
-#    unilm/beats checkout. The repo's vendored copy works without it; set
-#    only if you want `from BEATs import BEATs` to resolve to an external
-#    unilm tree (rarely needed).
-# export SO_BEATS_REPO=/path/to/unilm/beats
-```
+Each QA line contains `audio_path`, `question` (or `prompt`), and `answer`. For example:
 
-> **Quick start (QA fine-tune & bench only)**: you only need
-> `SO_BASE_MODEL`, `SO_DATASET_ROOT`, and `SO_ENCODER_CKPT` (items 1–3).
-> Item 4 (BEATs trunk) is required only if you want to *pretrain the
-> SO-Encoder yourself* (§3.1). Items 5–7 are advanced overrides.
+~~~json
+{"audio_path":"audio/train/example.wav","question":"How many sound sources are audible?","answer":"Two."}
+~~~
 
----
+Pass `--qa-root "$SO_DATASET_ROOT/qa" --audio-root "$SO_DATASET_ROOT"` to resolve dataset-relative paths. Preserve benchmark `qa_id`, `task_name`, and answer metadata. The released vocabulary has 63 classes: **keep its row order and label mapping unchanged** so class IDs match the encoder head.
 
-## 2. Data: SO-Dataset / SO-Bench
+## SO-Encoder
 
-### 2.1 Use the public release (recommended)
+The encoder implementation is included under [spatial_omni/encoders/beats](spatial_omni/encoders/beats). QA inference and training can start from the released SO-Encoder. To train the encoder itself, obtain `BEATs_iter3_plus_AS2M.pt` from [BEATs](https://github.com/microsoft/unilm/tree/master/beats) and build manifests from the extracted metadata:
 
-The 63-class SO-Dataset is released on HuggingFace as
-[`dieKarotte/SO-Dataset`](https://huggingface.co/datasets/dieKarotte/SO-Dataset)
-— ~1.1 TB of path-preserving tar shards. Download and extract:
+<details>
+<summary>Pretraining and encoder evaluation</summary>
 
-```bash
-pip install -U "huggingface_hub[cli]"
-hf download dieKarotte/SO-Dataset --repo-type dataset --local-dir SO-Dataset
+~~~bash
+export SO_BEATS_TRUNK_CKPT=/path/to/BEATs_iter3_plus_AS2M.pt
+for split in train valid test; do
+  python scripts/data/build_so_pretrain_manifest.py \
+    --metadata-jsonl "$SO_DATASET_ROOT/metadata/$split.jsonl" \
+    --data-root "$SO_DATASET_ROOT" \
+    --output "$SO_DATASET_ROOT/pretrain-$split.jsonl"
+done
+~~~
 
-# Full extraction (1 TB; ~30 min I/O on 4 workers)
-PYTHONPATH=. python scripts/data/extract_so_dataset.py \
-    --src ./SO-Dataset --dst ./SO-Dataset \
-    --splits train valid test --workers 4
-```
+The manifest builder resolves audio and trajectory paths. Use `--max-records` for a small subset; `--filter-missing` explicitly excludes records whose audio is absent.
 
-Layout after extraction:
-```
-SO-Dataset/
-├── audio/{train,valid,test}/foa_*.wav     (FOA, 4-ch, 16 kHz)
-├── annotations/{train,valid,test}/foa_*.csv  (DCASE-style frame CSV;
-│                                              including foa_*_src*.csv)
-├── metadata/{train,valid,test}.jsonl      (scene-level JSONL)
-├── qa/{train,valid,test}.jsonl            (1.45 M QA pairs total)
-├── so_vocab.csv                           (63-class taxonomy, frequency-sort,
-│                                            row N = SO-Encoder cls-head dim N)
-└── manifests/                             (per-shard summary)
-```
-
-```bash
-export SO_DATASET_ROOT=$PWD/SO-Dataset
-export SO_VOCAB=$SO_DATASET_ROOT/so_vocab.csv
-```
-
-The release ships `so_vocab.csv` directly — you don't need to regenerate it.
-The CSV's row order (FSD50K frequency-descending) **must match** the SO-Encoder
-checkpoint's classification head, so do not re-sort. The `label_id` integer in
-each `metadata/*.jsonl` source matches the `label_id` column of `so_vocab.csv`
-(both `0..62`); the loader joins by the `label` string, but the integer is
-kept consistent for users wiring custom pipelines.
-
-
-### 2.2 QA jsonl schema
-
-`qa/{train,valid,test}.jsonl` — one record per line:
-
-```json
-{
-  "qa_id": "qa_eaf8872e6092f714cbc5",
-  "split": "train",
-  "audio_id": "foa_2562b7c3a26059f6030e",
-  "audio_path": "audio/train/foa_2562b7c3a26059f6030e.wav",
-  "dataset": "hm3d",
-  "task_type": "counting",
-  "task_name": "identify_source_by_location",
-  "question": "What is the sound source located to the front-left and below the listener?",
-  "answer": "A string instrument is the sound source coming from the front-left and below.",
-  "canonical_answer": "string instrument",
-  "source_refs": [{"class_id": 47, "class_name": "string_instrument",
-                    "azimuth_deg": 67.057, "elevation_deg": -36.558, "distance_m": 1.61, ...}]
-}
-```
-
-`audio_path` is relative to `SO-Dataset/`. Pass `--qa-root SO-Dataset/qa --audio-root SO-Dataset` to the trainers / bench scripts so the QA loader can find the audio. The optional `prompt` field, if missing, is auto-mirrored from `question` at load time.
-
-**SO-Bench** = `qa/test.jsonl` (7,877 records). Pass it via `--qa-root SO-Dataset/qa --audio-root SO-Dataset --split test` to the bench tools.
-
-### 2.3 Bring your own QA dataset
-
-A QA root is just a directory with `train.jsonl` / `valid.jsonl` / `test.jsonl`. The required fields are `audio_path`, `(prompt | question)`, `answer`. FOA audio must be 4-channel FOA WAV at 16 kHz, ≤20 s.
-
----
-
-## 3. SO-Encoder pretraining & evaluation
-
-The SO-Encoder is a BEATs-based spatial audio backbone that maps a 20 s FOA
-clip to 50 spatial tokens (2.5 Hz, fed into the LLM via `<|spatial|>`).
-Pretraining it on SO-Dataset is OPTIONAL — you can also start from the
-released checkpoint and skip straight to §4.
-
-### 3.1 Pretrain on SO-Dataset
-
-**Required checkpoints / paths**
-
-| Asset | Source | Where |
-|---|---|---|
-| BEATs trunk weights | `BEATs_iter3_plus_AS2M.pt` from [microsoft/unilm/beats](https://github.com/microsoft/unilm/tree/master/beats) | `$SO_BEATS_TRUNK_CKPT` |
-| Source-class vocab | Ships with SO-Dataset release | `$SO_VOCAB` |
-| FOA audio + per-source CSVs | SO-Dataset extracted layout | `$SO_DATASET_ROOT` |
-
-**Step 1 — Build a pretraining manifest** (resolves `audio_path` / trajectory CSVs to absolute paths and drops missing files):
-```bash
-PYTHONPATH=. python scripts/data/build_so_pretrain_manifest.py \
-    --metadata-jsonl $SO_DATASET_ROOT/metadata/train.jsonl \
-    --data-root      $SO_DATASET_ROOT \
-    --output         $SO_DATASET_ROOT/pretrain-train.jsonl \
-    --filter-missing
-```
-
-**Step 2 — Launch DDP pretraining (8× A100 recommended)**:
-```bash
+~~~bash
 torchrun --nproc_per_node=8 -m spatial_omni.encoders.beats.train_so_pretrain \
-    --preset ov1 --distributed --ddp-find-unused-parameters \
-    --ov1-manifest          $SO_DATASET_ROOT/pretrain-train.jsonl \
-    --source-vocab-path     $SO_VOCAB --source-num-classes 63 \
-    --pretrained-beats-ckpt $SO_BEATS_TRUNK_CKPT \
-    --batch-size 2 --num-epochs 30 --learning-rate 1e-4 \
-    --output-dir ./runs/so_encoder_pretrain
-```
-- `--ddp-find-unused-parameters` is required (auxiliary heads go unused on
-  some batches).
-- Single-GPU smoke (`--batch-size 16`, no `--distributed`) also works.
+  --preset so_encoder --distributed \
+  --train-manifest "$SO_DATASET_ROOT/pretrain-train.jsonl" \
+  --valid-manifest "$SO_DATASET_ROOT/pretrain-valid.jsonl" \
+  --source-vocab-path "$SO_VOCAB" --source-num-classes 63 \
+  --pretrained-beats-ckpt "$SO_BEATS_TRUNK_CKPT" \
+  --batch-size 8 --num-workers 4 --amp bf16 \
+  --output-dir runs/so-encoder
+~~~
 
-### 3.2 Evaluate an SO-Encoder checkpoint on the test split
+The `so_encoder` preset defines the model, loss, and training schedule. To fine-tune the released encoder, add `--init-from-spatial-ckpt "$SO_ENCODER_CKPT"` and set `--learning-rate` and `--num-epochs` for the new data. `--resume` restores a training checkpoint. Logs and `best.pt`/`last.pt` are written under the output directory.
 
-`scripts/bench_so_encoder.py` reuses the trainer's `evaluate_one_epoch`, so
-the metrics match the validation log printed during training (Official DCASE
-SELD: F20, ER20, LE_CD, LR_CD, SELD_score, plus class accuracy and
-azi/ele/dist MAE).
+Evaluate an encoder on its held-out metadata split:
 
-```bash
-# 1) Build a test-split pretrain manifest
-PYTHONPATH=. python scripts/data/build_so_pretrain_manifest.py \
-    --metadata-jsonl $SO_DATASET_ROOT/metadata/test.jsonl \
-    --data-root      $SO_DATASET_ROOT \
-    --output         $SO_DATASET_ROOT/pretrain-test.jsonl \
-    --filter-missing
+~~~bash
+python scripts/bench_so_encoder.py \
+  --checkpoint "$SO_ENCODER_CKPT" \
+  --test-manifest "$SO_DATASET_ROOT/pretrain-test.jsonl" \
+  --source-vocab "$SO_VOCAB" --pretrained-beats-ckpt "$SO_BEATS_TRUNK_CKPT" \
+  --batch-size 4 --num-workers 4 --output-json runs/so-encoder-test.json
+~~~
 
-# 2) Bench 
-PYTHONPATH=. python scripts/bench_so_encoder.py \
-    --checkpoint            /path/to/so_encoder_best.pt \
-    --test-manifest         $SO_DATASET_ROOT/pretrain-test.jsonl \
-    --source-vocab          $SO_VOCAB \
-    --pretrained-beats-ckpt $SO_BEATS_TRUNK_CKPT \
-    --batch-size 4 --num-workers 4 \
-    --output-json /tmp/so_encoder_test_metrics.json
-```
+This reports SELD and localization metrics through the encoder's evaluation loop. It is separate from the language-model QA benchmark below.
 
-Reference metrics (released SO-Encoder, 1,632 test clips):
+</details>
 
-| Metric | F20 | ER20 | LE_CD (°) | LR_CD | SELD_score | class_acc | azi_mae (°) | ele_mae (°) | dist_mae (m) |
-|---|---|---|---|---|---|---|---|---|---|
-| Value | 0.486 | 0.528 | 13.63 | 0.575 | 0.386 | 0.873 | 10.05 | 4.47 | 0.359 |
+## Training
 
-> **`--source-vocab` must be the SAME vocab the checkpoint was trained on**
-> (frequency-sort, identical to the released `SO-Dataset/so_vocab.csv`).
-> An alphabetical or reordered vocab will silently mis-route the cls head
-> and tank F20 to ~0.
+The [three-stage launcher](shell/launch_train_so_7b.sh) trains SO-7B with a frozen native audio tower:
 
----
+| Stage | Updated components | Epochs | Learning rates |
+|---|---|---:|---|
+| 1 | Spatial projector | 2 | Projector `1e-4` |
+| 2 | Projector + language LoRA | 3 | Projector `3e-5`; LoRA `5e-5` |
+| 3 | SO-Encoder + projector + LoRA | 3 | Encoder/projector `1e-6`; LoRA `3e-5` |
 
-## 4. SO-7B QA fine-tuning (3 stages)
+~~~bash
+export RUN_ROOT=./runs/so7b-training
+CHECK_ONLY=1 bash shell/launch_train_so_7b.sh
+bash shell/launch_train_so_7b.sh
+~~~
 
-Three sequential stages, each resumes from the previous stage's
-`best_trainable.pt`. Use the bundled launcher
-[`shell/launch_train_so_7b.sh`](shell/launch_train_so_7b.sh) for the
-recommended schedule, or run the trainers directly:
+Defaults are 8 GPUs, batch size 2 per GPU, accumulation 3, BF16, and SDPA. `GPUS` selects device IDs; `BATCH_SIZE`, `GRAD_ACCUM_STEPS`, `NUM_WORKERS`, and `STAGE*_EPOCHS` override the recipe. For an initial two-GPU run, use `GPUS=0,1` and cap `MAX_TRAIN_SAMPLES`/`MAX_VALID_SAMPLES`. Learning rates in this launcher are explicit and do not automatically scale with batch size.
 
-**Required checkpoints / paths**
+Each stage initializes from the preceding stage's `checkpoints/best_trainable.pt`. `START_STAGE` and `STAGE2_RESUME_CKPT`/`STAGE3_RESUME_CKPT` select a starting point. For direct training from a released checkpoint, use `train_so_qa.py --resume-checkpoint-path ... --resume-model-only`; release files omit optimizer state. The trainer inherits the checkpoint's LoRA/projector settings from its adjacent configuration unless explicitly overridden.
 
-| Asset | Where |
-|---|---|
-| Qwen2.5-Omni-7B base model | `$SO_BASE_MODEL` (or `--model-id`) |
-| Pretrained SO-Encoder | `$SO_ENCODER_CKPT` (or `--beats-checkpoint`) |
-| QA + audio | `$SO_DATASET_ROOT/qa` and `$SO_DATASET_ROOT` |
+For **SO-7B-MIX**, prepare a replay directory with `train.jsonl` in the same QA schema and locally accessible mono audio:
 
-```bash
-# Stage 1 — train projector only (SO-Encoder + LLM frozen)
-torchrun --nproc_per_node=4 train_so_qa.py \
-    --projector-only \
-    --qa-root    $SO_DATASET_ROOT/qa \
-    --audio-root $SO_DATASET_ROOT \
-    --beats-checkpoint $SO_ENCODER_CKPT \
-    --attn-impl sdpa \
-    --output-dir ./runs/so7b_stage1 \
-    --epochs 5 --lr 1e-4
+~~~bash
+export RESUME_CKPT="$PWD/ckpts/Spatial-Omni/SO-7B/so/SO-7B.pt"
+export REPLAY_QA_ROOT=/path/to/replay
+export OUTPUT_DIR=./runs/so7b-mix
+bash shell/launch_train_so_7b_mix.sh check
+bash shell/launch_train_so_7b_mix.sh train
+~~~
 
-# Stage 2 — LLM LoRA + projector (SO-Encoder still frozen)
-torchrun --nproc_per_node=4 train_so_qa.py \
-    --encoder-lora \
-    --resume-checkpoint-path ./runs/so7b_stage1/checkpoints/best_trainable.pt \
-    --resume-model-only \
-    --qa-root    $SO_DATASET_ROOT/qa \
-    --audio-root $SO_DATASET_ROOT \
-    --beats-checkpoint $SO_ENCODER_CKPT \
-    --attn-impl sdpa \
-    --output-dir ./runs/so7b_stage2 \
-    --epochs 3 --lr 3e-5
+MIX defaults to spatial:replay 3:1, 8 GPUs, batch size 1, accumulation 4, and one epoch. Its default LR is `1e-5` at global batch 32 and scales with effective batch size; `LR` overrides it. Use each released checkpoint's `train_args.json` for its recorded training settings and data mixture.
 
-# Stage 3 — unfreeze SO-Encoder + LoRA + projector
-torchrun --nproc_per_node=4 train_so_qa.py \
-    --beats-lora \
-    --resume-checkpoint-path ./runs/so7b_stage2/checkpoints/best_trainable.pt \
-    --resume-model-only \
-    --qa-root    $SO_DATASET_ROOT/qa \
-    --audio-root $SO_DATASET_ROOT \
-    --beats-checkpoint $SO_ENCODER_CKPT \
-    --attn-impl sdpa \
-    --output-dir ./runs/so7b_stage3 \
-    --epochs 3 --lr 1e-5
-```
+Choose separate run directories. Training writes configurations, checkpoints, validation output, and TensorBoard events; monitor them with `tensorboard --logdir runs`. Both launchers support a command preview, and `python train_so_qa.py --help` lists the trainer options.
 
-Important details:
+## Evaluation
 
-- `--attn-impl sdpa` is required. The default `auto` auto-detects
-  flash-attn 2 when installed, but the upstream Qwen2.5-Omni
-  `_update_causal_mask` raises on `padding_side='right'` + flash-attn 2 and
-  the trainer right-pads (label mask is on the right). `sdpa` (PyTorch
-  native) bypasses the check.
-- `--audio-root` lets the QA loader find audio when `audio_path` is relative
-  to a different root than `--qa-root` (the SO-Dataset HF release puts
-  `qa/` and `audio/` as siblings under the dataset root).
-- Legacy checkpoints with the old `spatial_beats_*` / `seld233_*` keys are
-  loaded transparently — see
-  [`spatial_omni/utils/ckpt_compat.py`](spatial_omni/utils/ckpt_compat.py).
+Generate predictions from the dedicated SO-Bench release:
 
-### Continuing from a previously-trained SO-7B checkpoint
-
-To resume training (e.g. stage-3 LoRA on a new QA distribution) from any
-existing `best_trainable.pt`:
-
-```bash
-torchrun --nproc_per_node=8 train_so_qa.py \
-    --beats-lora \
-    --resume-checkpoint-path /path/to/best_trainable.pt \
-    --resume-model-only \
-    --qa-root    $SO_DATASET_ROOT/qa \
-    --audio-root $SO_DATASET_ROOT \
-    --model-id        $SO_BASE_MODEL \
-    --beats-checkpoint $SO_ENCODER_CKPT \
-    --attn-impl sdpa \
-    --output-dir ./runs/so7b_continue \
-    --epochs 3 --batch-size 2 --grad-accum-steps 3 \
-    --lr 3e-5 --lora-lr 3e-5 --projector-lr 1e-6 --beats-lr 1e-6 \
-    --lora-r 16 --lora-alpha 32 \
-    --lora-target-modules q_proj k_proj v_proj o_proj \
-    --encoder-token-rate 10.0 --projector-shuffle-factor 4 \
-    --warmup-ratio 0.03
-```
-
-`--resume-model-only` reloads the model state dict but reinitializes the
-optimizer + scheduler — use this when starting a fresh schedule on top of
-old weights. Drop the flag to fully resume optimizer/scheduler from a
-crashed run.
-
----
-
-## 5. Inference & evaluation on SO-Bench
-
-`scripts/bench_test_generate.py` reads `train_args.json` next to each
-checkpoint, so you do **not** pass `--model-id` / `--beats-checkpoint` /
-`--beats-repo` on the CLI — those come from the saved training config.
-
-### 5.1 Generate predictions on the test split
-
-```bash
+~~~bash
+export EVAL_ROOT=./outputs/so7b-bench
 python scripts/bench_test_generate.py \
-    --run-dir ./runs/so7b_stage3 \
-    --checkpoint-tags best \
-    --qa-root    $SO_DATASET_ROOT/qa \
-    --audio-root $SO_DATASET_ROOT \
-    --split test
-```
-Predictions land in `./runs/so7b_stage3/bench/test/best/predictions.jsonl`
-(one record per line, with `prediction` / `prediction_cleaned` /
-`raw_exact_match` / `cleaned_exact_match`).
+  --checkpoint-paths "$SO_CHECKPOINT" --model-id "$SO_BASE_MODEL" \
+  --beats-checkpoint "$SO_ENCODER_CKPT" \
+  --qa-root "$SO_BENCH_ROOT/qa" --audio-root "$SO_BENCH_ROOT" --split test \
+  --batch-size 1 --num-workers 4 --dtype bfloat16 --attn-impl sdpa \
+  --max-new-tokens 96 --num-beams 1 --output-dir "$EVAL_ROOT"
+~~~
 
-Flags worth knowing:
-- `--checkpoint-tags best last epoch_003` — bench multiple ckpts under
-  `<run-dir>/checkpoints/`.
-- `--checkpoint-paths /path/a.pt /path/b.pt` — explicit list (overrides `--run-dir`).
-- `--checkpoint-glob 'step_0*_trainable.pt'` — sweep step ckpts.
-- `--batch-size 1 --num-beams 4 --max-new-tokens 96` — generation knobs.
+For an initial check, add `--max-samples 4` and choose a separate output directory. SO-7B writes `$EVAL_ROOT/SO-7B/predictions.jsonl`; MIX writes `$EVAL_ROOT/SO-7B-MIX/predictions.jsonl`. `--checkpoint-paths` accepts multiple checkpoints, and `--run-dir` selects a training run. Keep generation settings and the dataset revision fixed when comparing models.
 
-### 5.2 Score predictions
+Use [scripts/score_sobench.py](scripts/score_sobench.py) for task-aware scoring. Set `PREDICTIONS` to the generated file and validate its QA alignment:
 
-```bash
-python scripts/score_test_predictions.py \
-    --predictions-jsonl ./runs/so7b_stage3/bench/test/best/predictions.jsonl \
-    --qa-root           $SO_DATASET_ROOT/qa --split test \
-    --output-json       ./runs/so7b_stage3/bench/test/best/metrics.json \
-    --md-output         ./runs/so7b_stage3/bench/test/best/metrics.md
-```
-Computes per-task accuracy, azimuth/elevation MAE, distance MAE,
-direction-bin EM, and detection-task F1. The default thresholds are
-configurable (`--azimuth-threshold-deg`, `--elevation-threshold-deg`, etc.).
+~~~bash
+export PREDICTIONS="$EVAL_ROOT/SO-7B/predictions.jsonl"
+python scripts/score_sobench.py --predictions-jsonl "$PREDICTIONS" \
+  --qa-root "$SO_BENCH_ROOT/qa" --expected-examples 7877 --dry-run
+~~~
 
-Optional **LLM judge** for borderline-EM single-label tasks (uses an
-OpenAI-compatible API, env var `SO_LLM_API_KEY`):
-```bash
-python scripts/score_test_predictions.py \
-    --predictions-jsonl ./runs/so7b_stage3/bench/test/best/predictions.jsonl \
-    --qa-root $SO_DATASET_ROOT/qa --split test \
-    --llm-judge --llm-model gpt-4o \
-    --llm-base-url https://api.openai.com/v1 \
-    --output-json /tmp/metrics_with_judge.json
-```
+For a four-question generation check, use `--expected-examples 4` instead.
 
-### 5.3 Sweep multiple checkpoints
+Live semantic judging reads `OPENAI_API_KEY` and optionally `OPENAI_BASE_URL` from the environment. Speech WER is computed locally.
 
-```bash
-python scripts/batch_bench_so_qa.py \
-    --run-dir ./runs/so7b_stage3 \
-    --qa-root $SO_DATASET_ROOT/qa --audio-root $SO_DATASET_ROOT \
-    --split test
-```
-Runs `bench_test_generate.py` + `score_test_predictions.py` for every
-checkpoint under `<run-dir>/checkpoints/`, writing one `metrics.json` per
-ckpt.
+~~~bash
+python scripts/score_sobench.py --predictions-jsonl "$PREDICTIONS" \
+  --qa-root "$SO_BENCH_ROOT/qa" --expected-examples 7877 \
+  --model gpt-4o-mini --concurrency 8 --max-rpm 120 \
+  --angle-threshold-deg 20 --elevation-threshold-deg 10 \
+  --distance-threshold-m 1.0 --time-threshold-s 0.2 \
+  --detect-source-time-policy event_only \
+  --spatial-temporal-time-policy semantic_times_iou \
+  --require-api --no-skip-sensitive-api-errors \
+  --output-json "$EVAL_ROOT/score.json" --judged-jsonl "$EVAL_ROOT/judged.jsonl" \
+  --cache-jsonl "$EVAL_ROOT/judge_cache.jsonl"
+~~~
 
-### 5.4 Unified driver
+Retain predictions, QA IDs, judge cache, and scoring settings. The cache supports retries; `--offline` recomputes scores from existing judgements. Use separate caches for different judge models, prompts, and prediction sets. A complete report has 7,877 examples and zero API fallbacks, skipped API records, or scoring errors. The older `score_test_predictions.py` implements a different protocol.
 
-```bash
-torchrun --nproc_per_node=4 scripts/run_bench.py \
-    --baseline so-7b \
-    --run-dir  ./runs/so7b_stage3 \
-    --qa-root  $SO_DATASET_ROOT/qa --audio-root $SO_DATASET_ROOT \
-    --split    test
-```
-`scripts/run_bench.py` is a thin dispatcher that sets up DDP once and calls
-the right generation sub-script. For the SO-7B SO-Encoder pipeline use
-`--baseline so-7b`; `--baseline zero-spatial` runs the same backbone with the
-spatial input zeroed out (diagnostic).
+## Results
 
-<!-- ### 5.5 Diagnostic ablations
+Results for the **September 2026 SO-7B checkpoints**:
 
-Drop the Qwen mono `<|AUDIO|>` branch entirely (only spatial tokens reach
-the LLM):
-```bash
-python scripts/bench_test_generate.py \
-    --run-dir ./runs/so7b_stage3 --checkpoint-tags best \
-    --qa-root $SO_DATASET_ROOT/qa --audio-root $SO_DATASET_ROOT \
-    --split test --drop-mono-audio
-```
+| Model | SO-Bench | MMAU test-mini | MMAU-Pro |
+|---|---:|---:|---:|
+| SO-7B | 70.06% | 60.50% | 45.30% |
+| SO-7B-MIX | 71.72% | 64.50% | 51.86% |
 
-Replace spatial input with zeros (measures how much the LLM relies on
-spatial tokens):
-```bash
-python scripts/bench_test_generate.py \
-    --run-dir ./runs/so7b_stage3 --checkpoint-tags best \
-    --qa-root $SO_DATASET_ROOT/qa --audio-root $SO_DATASET_ROOT \
-    --split test --spatial-ablation zero
-```
+SO-Bench uses 7,877 examples; MMAU test-mini uses 1,000 and MMAU-Pro 4,163 unique examples. These checkpoints update the general-audio results of the earlier paper checkpoints. SO-Bench averages task-specific per-question scores, including temporal IoU and the speech indicator WER ≤ 0.5.
 
-Output dirs are auto-suffixed (`__drop_mono_audio`, `__zero` etc.) so you
-don't overwrite the joint baseline. -->
+The recorded SO-Bench protocol uses `gpt-4o-mini`, 20° azimuth, 10° elevation, **1 m distance and 0.2 s onset** tolerances. Appendix D of the paper states **0.5 m and 0.4 s**; the table uses the recorded protocol shown in the evaluation command.
 
----
+## Citation
 
-## 6. Repository layout
-
-```
-Spatial-Omni/
-├── README.md, LICENSE, .gitignore
-├── requirements.txt, environment.yml
-├── train_so_qa.py            # SO-7B trainer (3-stage) — the main entry point
-├── spatial_omni/             # Python package
-│   ├── model/                # Qwen2.5-Omni + Spatial-Thinker subclass
-│   ├── modules/              # SO-Encoder, projectors (+ SELD/IV adapters)
-│   ├── encoders/beats/       # vendored BEATs + SO-Encoder extension
-│   ├── encoders/seldnet/     # vendored DCASE 2024 SELD baseline
-│   ├── data/, utils/
-├── scripts/
-│   ├── data/                 # SO-Dataset extraction, manifest building, vocab,
-│   │                         #   release_so_encoder_ckpt.py (ckpt scrubber)
-│   ├── bench_so_encoder.py   # SO-Encoder eval
-│   ├── bench_test_generate.py / batch_bench_so_qa.py / run_bench.py
-│   ├── score_test_predictions.py
-│   └── precompute_*.py       # optional feature caches
-├── shell/                    # ready-to-run launcher recipes
-│   ├── launch_train_so_7b.sh # 3-stage SO-7B training
-│   └── launch_bench_test.sh  # test-split bench
-├── configs/                  # DeepSpeed config(s)
-└── tests/                    # integration smoke tests
-```
-
-> **SO-30B (Qwen3-Omni-MoE)** — on the `so-30b` branch only:
-> `train_so_qa_qwen3.py` (wrapper trainer), `requirements-so30b.txt` /
-> `environment-so30b.yml` (separate env), `configs/ds_zero3_so30b.json`, and
-> under `spatial_omni/model/`: `configuration_qwen3_omni.py`,
-> `modeling_so_thinker_qwen3.py`, `processing_so_qwen3.py`. Launchers:
-> `shell/launch_train_so_30b.sh`, `shell/launch_train_so_30b_h20_ddp.sh`,
-> `shell/launch_train_so_30b_curriculum.sh`. Bench/diagnostics:
-> `scripts/bench_test_generate_qwen3.py`,
-> `scripts/sanity_check_so_qwen3_generate.py`,
-> `scripts/probe_valid_loss_so_qwen3.py`.
-
-> The repo also ships optional comparison baselines (`train_iv_qa.py`,
-> `scripts/train_seld_qa.py` and their launchers) that reuse the same data
-> pipeline. They are not part of the SO-7B route documented above.
-
----
-
-## 7. Citations
-
-If you use Spatial-Omni in academic work, please cite us as follows:
-
-```bibtex
+~~~bibtex
 @misc{zhu2026spatialomnispatialaudiounderstanding,
-      title={Spatial-Omni: Spatial Audio Understanding Integration in Multimodal LLMs via FOA Encoding},
-      author={Zhiyuan Zhu and Yixuan Chen and Yiwen Shao and Wenxiang Guo and Changhao Pan and Yu Zhang and Yuxiang Wang and Wei Liu and Houhua Zhang and Chengkuan Zeng and Wenbo Cheng and Yunxi Liu and Rui Yang and Steve Yves and Liefeng Bo and Zhou Zhao},
-      year={2026},
-      eprint={2606.10738},
-      archivePrefix={arXiv},
-      primaryClass={eess.AS},
-      url={https://arxiv.org/abs/2606.10738},
+  title={Spatial-Omni: Spatial Audio Understanding Integration in Multimodal LLMs via FOA Encoding},
+  author={Zhiyuan Zhu and Yixuan Chen and Yiwen Shao and Wenxiang Guo and Changhao Pan and Yu Zhang and Yuxiang Wang and Wei Liu and Houhua Zhang and Chengkuan Zeng and Wenbo Cheng and Yunxi Liu and Rui Yang and Steve Yves and Liefeng Bo and Zhou Zhao},
+  year={2026},
+  eprint={2606.10738},
+  archivePrefix={arXiv},
+  primaryClass={eess.AS},
+  url={https://arxiv.org/abs/2606.10738}
 }
-```
----
+~~~
 
-## 8. License
+## License and acknowledgements
 
-Apache 2.0. See [`LICENSE`](LICENSE). Third-party components retain their
-original licenses (Apache 2.0 / MIT).
+Code is released under [Apache 2.0](LICENSE); published Spatial-Omni weights use [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). Base models, datasets, and third-party components retain their own licenses. We build on [Qwen2.5-Omni-7B](https://huggingface.co/Qwen/Qwen2.5-Omni-7B), [BEATs](https://github.com/microsoft/unilm/tree/master/beats), and the [DCASE SELD baseline](https://github.com/sharathadavanne/seld-dcase2024).
+
+The repository also includes [intensity-vector](train_iv_qa.py) and [SELD](scripts/train_seld_qa.py) comparison baselines. Their weights and configurations are separate from the SO-Encoder path above.

@@ -198,6 +198,8 @@ def parse_args():
     p.add_argument("--save-full-model", action="store_true")
     p.set_defaults(train_mode="projector_only", save_every_epoch=True)
     args = p.parse_args()
+    from spatial_omni.utils.release import apply_checkpoint_architecture
+    apply_checkpoint_architecture(args, sys.argv[1:])
     if args.qa_roots:
         args.qa_roots = [os.path.abspath(r) for r in args.qa_roots]
     else:
@@ -1347,7 +1349,8 @@ def resume_training_state(model, opt, sched, path, model_only, device):
     sd = ckpt.get("trainable_state_dict", ckpt)
     sd = remap_legacy_state_dict(sd)
     sd = align_peft_prefix(sd, model)
-    res = unwrap_model(model).load_state_dict(sd, strict=False)
+    from spatial_omni.utils.release import load_curriculum_state
+    res = load_curriculum_state(unwrap_model(model), sd)
     if not model_only:
         os_ = ckpt.get("optimizer")
         if os_ is not None: opt.load_state_dict(os_)
@@ -1497,8 +1500,15 @@ def train_one_epoch(model, loader, opt, sched, device, grad_accum_steps, max_gra
         with ctx: (loss / grad_accum_steps).backward()
         if should:
             if max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    [p for p in model.parameters() if p.requires_grad], max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad], max_grad_norm,
+                    error_if_nonfinite=True,
+                )
+                if writer is not None:
+                    writer.add_scalar("train/grad_norm", float(grad_norm),
+                                      global_optimizer_step_start + os_ + 1)
+                if is_main_process() and step % max(1, log_every) == 0:
+                    rank0_print(f"[gradient] step={step} norm={float(grad_norm):.6f}")
             opt.step()
             if sched is not None: sched.step()
             opt.zero_grad(set_to_none=True); os_ += 1

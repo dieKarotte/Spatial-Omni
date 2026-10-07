@@ -1,9 +1,4 @@
-"""Dataset skeleton for the simplified Spatial-BEATs training pipeline.
-
-This file defines the data interfaces, vocabulary contracts, and batch tensor
-shapes for Spatial-BEATs. The actual data loading logic is intentionally left
-unimplemented so the I/O structure can be reviewed first.
-"""
+"""FOA dataset loading, vocabulary handling, and batch collation."""
 
 from dataclasses import dataclass, field
 import csv
@@ -78,7 +73,7 @@ class SpatialDatasetConfig:
     allowed_splits: Optional[tuple[str, ...]] = None
     show_progress: bool = True
 
-    # === v13_B [B-5] Real-distribution augment ==============================
+    # === Real-distribution augment ==============================
     # All augment flags default to "off" so existing presets are unaffected.
     # Augments are ONLY applied when the dataset's allowed_splits contains
     # "train" (i.e. training data), never on valid/test.
@@ -1119,7 +1114,7 @@ def _maybe_crop_sample(
 
 
 # =============================================================================
-# v13_B [B-5] Waveform-level augmentation
+# Waveform-level augmentation
 # =============================================================================
 
 
@@ -1265,7 +1260,7 @@ class SpatialDataset(Dataset):
                     f"dropped {dropped_invalid_geometry} entries with missing DOA geometry"
                 )
 
-        # v13_B [B-5]: enable augment only on training splits.
+        # enable augment only on training splits.
         _splits = config.allowed_splits or ()
         self._is_train_split = ("train" in set(_splits))
         self._augment_enabled = bool(
@@ -1357,7 +1352,7 @@ class SpatialDataset(Dataset):
             min_crop_duration_seconds=self.config.min_crop_duration_seconds,
         )
 
-        # v13_B [B-5]: waveform-level augment (training only)
+        # waveform-level augment (training only)
         if self._augment_enabled:
             waveform = _apply_waveform_augment(waveform, self.config)
 

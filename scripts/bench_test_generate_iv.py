@@ -139,7 +139,7 @@ def build_eval_model_args(runtime_args: argparse.Namespace,
     merged = dict(_IV_DEFAULTS)
     merged.update({k: v for k, v in train_args.items() if v is not None})
     # Runtime-only knobs (device / attn impl) may be overridden via CLI.
-    # CRITICAL: always forward runtime_args.device so DDP ranks each land on
+    # always forward runtime_args.device so DDP ranks each land on
     # their own cuda:{LOCAL_RANK}. train_args.json stores the training-time
     # device (usually "cuda:0"), which would otherwise pile all 8 ranks onto
     # cuda:0 and OOM.

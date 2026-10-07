@@ -55,8 +55,8 @@ class SeldFeatureBridge(nn.Module):
         1. Validate that the input is `16 kHz`, `4-channel FOA`.
         2. Convert sample-level masks into valid waveform lengths.
         3. Convert waveform lengths into expected baseline feature lengths.
-        4. Delegate the actual STFT/mel/intensity-vector extraction to an
-           intentionally unimplemented private hook.
+        4. Extract STFT, mel and intensity-vector features with the
+           baseline normalization.
 
     Output:
         [`SeldFeatureBridgeOutput`]
@@ -217,20 +217,8 @@ class SeldFeatureBridge(nn.Module):
 
         audio_channels_first = spatial_audio.transpose(1, 2).to(dtype=torch.float32)
         stft_input = audio_channels_first.reshape(batch_size * num_channels, max_audio_steps)
-        # The STFT + mel + intensity pipeline has no trainable parameters (only
-        # frozen buffers). It's run in fp32 for numerical stability. We do NOT
-        # wrap in torch.no_grad() here: that would sever the autograd chain
-        # from spatial_audio into the downstream adapter, and for the IV path
-        # the in-place assignment pattern
-        #     spatial_tokens[idx, :n] = adapter(...)
-        # in iv_spatial_adapters.py empirically produces all-NaN grads on the
-        # adapter weights when the LHS has requires_grad=False. Autograd can
-        # safely skip the (frozen) bridge internals; it just needs the graph
-        # to remain traceable from spatial_audio forward.
-        #
-        # cuFFT plan exhaustion on long runs (the original Run 2 crash at
-        # step 2586) is handled below by catching the RuntimeError and
-        # falling back to a one-shot CPU STFT.
+        # Use fp32 for STFT and retain gradient tracking through the feature
+        # pipeline. A cuFFT failure triggers a CPU STFT fallback below.
         try:
             stft = torch.stft(
                 stft_input,

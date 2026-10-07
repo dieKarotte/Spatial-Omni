@@ -1,9 +1,4 @@
-"""Top-level model skeleton for the simplified Spatial-BEATs encoder.
-
-This file intentionally defines interfaces, shape contracts, and module
-boundaries first. The internal logic is left as TODOs so the architecture can
-be reviewed before implementation begins.
-"""
+"""SO-Encoder backbone with acoustic and spatial feature fusion."""
 
 import os
 from dataclasses import dataclass
@@ -288,22 +283,22 @@ class SOBackboneConfig(BEATsConfig):
         self.trunk_adapter_layers: str = "all"   # "all" / "top4" / "top8"
         self.trunk_adapter_gate_init: float = 1e-2
 
-        # === v13_B [B-1] per-class learnable activity bias (FrameTrackHeads) =
+        # === per-class learnable activity bias (FrameTrackHeads) =
         self.use_class_activity_bias: bool = False
-        # === v13_B [B-3] class-conditional activity gate =====================
+        # === class-conditional activity gate =====================
         self.use_class_conditional_gate: bool = False
         self.gate_class_emb_dim: int = 32
         self.gate_hidden_dim: int = 128
         self.gate_scale: float = 0.5
 
-        # === v13_C [C-2] track-wise refinement decoder =======================
+        # === track-wise refinement decoder =======================
         self.use_track_refinement: bool = False
         self.track_refinement_layers: int = 2
         self.track_refinement_heads: int = 8
         self.track_refinement_ffn: int = 2048
         self.track_refinement_dropout: float = 0.0
 
-        # === v13_C [C-4] log-distance + Laplace NLL head =====================
+        # === log-distance + Laplace NLL head =====================
         self.use_log_distance_head: bool = False
         self.log_distance_init_mean: float = 0.4        # log(1.5) ≈ 0.405
         self.log_distance_init_log_var: float = -3.2   # log(0.04) ≈ -3.22
@@ -417,31 +412,11 @@ class SOBackboneOutput:
 
 
 class SOBackbone(nn.Module):
-    """Simplified Spatial-BEATs encoder skeleton.
+    """Encode FOA waveforms with a BEATs trunk and spatial supervision heads.
 
-    Example shape flow for a 10-second clip at 16kHz:
-        waveform:              [B, 4, 160000]
-        foa_feat:              [B, 7, 1000, 128]
-        fused_feat:            [B, 1, 1000, 128]
-        delta_patch_tokens:    [B, 496, 512]
-        patch_tokens:          [B, 496, 512]
-        encoder_memory:        [B, 496, 768]
-        temporal_patch_tokens: [B, 62, 768]
-        temporal_tokens:       [B, T_s_max, 768]
-        spatial_embeddings:    [B, T_s_max, 768]
-        slot_latents:          [B, T_s_max, 4, 768]
-        llm_spatial_tokens:    [B, T_s_max, d_llm]
-
-    Notes on variable-length clips:
-        Each sample i has its own valid token count:
-            T_s_i = round(duration_i * 2.5)
-        Within one batch, all temporal outputs are padded to:
-            T_s_max = max_i T_s_i
-        For a 10-second sample, T_s_i = 25.
-
-    The supervision heads are attached only to ensure gradient flow into the
-    encoder. The final LLM-facing tokens come from the main spatial embeddings,
-    not from slot predictions.
+    Temporal outputs carry per-sample valid lengths and padding masks.
+    The configured token rate determines the temporal resolution; task
+    heads provide the class, activity, direction and distance losses.
     """
 
     def __init__(self, cfg: SOBackboneConfig) -> None:
@@ -482,7 +457,7 @@ class SOBackbone(nn.Module):
                 out_proj_scale_init=cfg.patch_adapter_out_proj_scale_init,
             )
         elif cfg.patch_adapter_version == "v3":
-            # v13_C [C-3] multi-scale adapter (3x3 + 5x5 + dilated)
+            # multi-scale adapter (3x3 + 5x5 + dilated)
             self.spatial_patch_adapter = SpatialDeltaPatchAdapterV3(
                 in_channels=cfg.foa_feature_channels,
                 hidden_channels=cfg.patch_adapter_v2_hidden,
@@ -695,7 +670,7 @@ class SOBackbone(nn.Module):
                     log_distance_init_mean=cfg.log_distance_init_mean,
                     log_distance_init_log_var=cfg.log_distance_init_log_var,
                 )
-                # v13_C [C-2] optional track-wise refinement decoder
+                # optional track-wise refinement decoder
                 if cfg.use_track_refinement:
                     self.track_refinement_decoder = TrackRefinementDecoder(
                         num_tracks=cfg.frame_track_num_queries,
@@ -855,7 +830,7 @@ class SOBackbone(nn.Module):
                     log_distance_init_mean=cfg.log_distance_init_mean,
                     log_distance_init_log_var=cfg.log_distance_init_log_var,
                 )
-                # v13_C [C-2] optional track-wise refinement decoder
+                # optional track-wise refinement decoder
                 if cfg.use_track_refinement:
                     self.track_refinement_decoder = TrackRefinementDecoder(
                         num_tracks=cfg.frame_track_num_queries,
@@ -897,7 +872,7 @@ class SOBackbone(nn.Module):
             self.accdoa_heads = None
             self.frame_wise_heads = None
             self.local_spatial_fuser = None
-        # v13_C [C-2]: declare attribute on all branches so forward() check works
+        # declare attribute on all branches so forward() check works
         if not hasattr(self, "track_refinement_decoder"):
             self.track_refinement_decoder = None
         self.projector = SOTokenProjector(
@@ -1686,7 +1661,7 @@ class SOBackbone(nn.Module):
                     fused=fused_spatial_embeddings,
                     padding_mask=temporal_padding_mask,
                 )
-                # v13_C [C-2] optional track-wise refinement (zero-init residual)
+                # optional track-wise refinement (zero-init residual)
                 if self.track_refinement_decoder is not None:
                     track_time_features = self.track_refinement_decoder(
                         track_tokens=track_time_features,
@@ -1778,7 +1753,7 @@ class SOBackbone(nn.Module):
                     fused=fused_spatial_embeddings,
                     padding_mask=temporal_padding_mask,
                 )
-                # v13_C [C-2] optional track-wise refinement (zero-init residual)
+                # optional track-wise refinement (zero-init residual)
                 if self.track_refinement_decoder is not None:
                     track_time_features = self.track_refinement_decoder(
                         track_tokens=track_time_features,
@@ -1862,34 +1837,10 @@ class SOBackbone(nn.Module):
         map_location: str = "cpu",
         strict_encoder: bool = False,
     ) -> None:
-        """Load compatible BEATs pretrained weights into the Spatial-BEATs trunk.
+        """Load compatible BEATs trunk parameters from a checkpoint.
 
-        Intended loading policy:
-            Reuse directly:
-                - layer_norm.*
-                - post_extract_proj.*
-                - encoder.pos_conv.*
-                - encoder.layers.*
-                - encoder.layer_norm.*
-
-            Do not load directly:
-                - original BEATs preprocess()
-                - new FOA preprocessor
-                - new channel mixer
-                - original predictor
-                - all new spatial modules
-
-            Source label setup:
-                - source_num_classes should follow final_vocabulary.csv
-                - default vocabulary path points to the local FSD50K file
-
-        Args:
-            checkpoint_path:
-                Path to a BEATs pretrained checkpoint.
-            map_location:
-                torch.load map location.
-            strict_encoder:
-                Whether to require strict matching on the trunk-compatible keys.
+        Spatial modules and task heads retain their initialization. Source
+        parameters are matched to the trunk by name and tensor shape.
         """
         is_main_process = (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
         # The BEATs trunk checkpoint only provides *initial* weights for the
@@ -2050,9 +2001,9 @@ class SOBackbone(nn.Module):
         checkpoint_path: str,
         map_location: str = "cpu",
     ) -> None:
-        """Load a BEATs trunk-only fine-tune checkpoint (v13_F stage 1 output).
+        """Load a BEATs trunk-only fine-tune checkpoint (trunk pretraining output).
 
-        ``train_beats_multilabel_trunk.py`` saves a checkpoint dict with a
+        The input checkpoint contains a
         dedicated ``beats_only`` field whose state-dict has the ``beats.``
         prefix already stripped — keys look like::
 

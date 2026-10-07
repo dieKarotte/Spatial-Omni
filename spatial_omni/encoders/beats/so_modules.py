@@ -1481,7 +1481,7 @@ class FrameTrackPredictionOutput:
             num_active head; when present, downstream CSV / validation can use
             ``argmax`` as the adaptive K̂ for activity gating.
         pred_distance_log_var:
-            [B, K, T_s] optional Laplace scale (log-variance) from the v13_C
+            [B, K, T_s] optional Laplace scale (log-variance) from the
             log-distance head.  Only present when ``use_log_distance_head`` is
             enabled; otherwise None.  The NLL loss uses this to weight per-frame
             distance errors; inference ignores it.
@@ -1743,14 +1743,14 @@ class FrameTrackPredictionHeads(nn.Module):
         spatial_head_demixer_dropout: float = 0.1,
         use_num_active_head: bool = False,
         num_active_max: int = 4,
-        # --- v13_B: per-class learnable activity bias ------------------------
+        # --- per-class learnable activity bias ------------------------
         use_class_activity_bias: bool = False,
-        # --- v13_B: class-conditional activity gate --------------------------
+        # --- class-conditional activity gate --------------------------
         use_class_conditional_gate: bool = False,
         gate_class_emb_dim: int = 32,
         gate_hidden_dim: int = 128,
         gate_scale: float = 0.5,
-        # --- v13_C: log-distance + uncertainty head --------------------------
+        # --- log-distance + uncertainty head --------------------------
         use_log_distance_head: bool = False,
         log_distance_init_mean: float = 0.4,   # log(1.5) ≈ 0.405
         log_distance_init_log_var: float = -3.2,  # log(0.04) ≈ -3.22
@@ -1857,7 +1857,7 @@ class FrameTrackPredictionHeads(nn.Module):
         else:
             self.num_active_head = None
 
-        # --- v13_B [B-1]: per-class learnable activity bias ------------------
+        # --- per-class learnable activity bias ------------------
         # Adds a per-class logit bias to activity_logit, using the predicted
         # class-softmax as a soft assignment so gradients flow. Zero-init →
         # identical to legacy behavior at ep0.
@@ -1867,7 +1867,7 @@ class FrameTrackPredictionHeads(nn.Module):
         else:
             self.class_activity_bias = None
 
-        # --- v13_B [B-3]: class-conditional activity gate --------------------
+        # --- class-conditional activity gate --------------------
         # Small MLP that fuses token + soft-class-embedding + direction vector
         # into an additive activity logit. Last Linear is zero-init → ep0 gate
         # contribution = 0, identical to legacy.
@@ -1890,7 +1890,7 @@ class FrameTrackPredictionHeads(nn.Module):
             self.gate_class_embedding = None
             self.class_conditional_gate = None
 
-        # --- v13_C [C-4]: log-distance + uncertainty (Laplace) head ----------
+        # --- log-distance + uncertainty (Laplace) head ----------
         # Upgrades distance_head output from 1 scalar (distance) to 2 scalars
         # [log_distance, log_var]. Recognised by spatial_loss when
         # distance_loss_type == "laplace_nll".  At init:
@@ -1980,7 +1980,7 @@ class FrameTrackPredictionHeads(nn.Module):
                 spatial_input = spatial_input + spatial_residual
         direction = F.normalize(self.direction_head(spatial_input), dim=-1)
 
-        # --- v13_C [C-4]: log-distance + uncertainty head --------------------
+        # --- log-distance + uncertainty head --------------------
         distance_log_var: Optional[Tensor] = None
         if self.use_log_distance_head:
             dist_out = self.distance_head(spatial_input)  # [B, K, T_s, 2]
@@ -1991,7 +1991,7 @@ class FrameTrackPredictionHeads(nn.Module):
         else:
             distance = F.softplus(self.distance_head(spatial_input)).squeeze(-1)
 
-        # --- v13_B [B-1]: per-class learnable activity logit bias -----------
+        # --- per-class learnable activity logit bias -----------
         # Add per-class bias weighted by predicted class softmax; since this
         # enters the same logit used by BCE/ASL loss, the bias is learned via
         # backprop without any explicit threshold tuning.
@@ -2002,7 +2002,7 @@ class FrameTrackPredictionHeads(nn.Module):
             )  # [B, K, T_s]
             activity = activity + expected_bias
 
-        # --- v13_B [B-3]: class-conditional activity gate -------------------
+        # --- class-conditional activity gate -------------------
         if self.class_conditional_gate is not None and self.gate_class_embedding is not None:
             # soft class embedding: softmax(class_logits) @ embedding_weight
             class_probs_for_gate = F.softmax(class_logits, dim=-1)  # [B, K, T_s, C]
@@ -2676,12 +2676,12 @@ class SpatialAdapterLayer(nn.Module):
 
 
 # =============================================================================
-# v13_C additions
+# Track refinement and multi-scale adapters
 # =============================================================================
 
 
 class TrackRefinementDecoder(nn.Module):
-    """[C-2] Track-wise temporal refinement transformer decoder.
+    """Track-wise temporal refinement transformer decoder.
 
     Takes per-frame K-track tokens ``[B, K, T_s, D]`` (output of
     SourceQueryDecoder) and the underlying fused memory ``[B, T_s, D]``,
@@ -2768,7 +2768,7 @@ class TrackRefinementDecoder(nn.Module):
 
 
 class SpatialDeltaPatchAdapterV3(nn.Module):
-    """[C-3] Multi-scale spatial delta patch adapter (V3).
+    """Multi-scale spatial delta patch adapter (V3).
 
     Extends V2 by adding parallel Conv branches at multiple kernel sizes and
     dilations, fused via 1x1 conv. Intended to capture longer-time-scale

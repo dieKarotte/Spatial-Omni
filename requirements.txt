@@ -1,18 +1,5 @@
-# ============================================================================
-# Spatial-Omni (SO-7B) — pip requirements
-#
-# Pinned to the versions this repo is developed & tested against:
-#   Python 3.11, CUDA 12.4, PyTorch 2.5.1
-#
-# For a one-command setup with the correct CUDA build of PyTorch, prefer the
-# conda recipe in `environment.yml` (see README §1). If you install with pip,
-# make sure your CUDA toolkit matches the cu124 wheels below, or adjust the
-# --index-url / version suffix for your platform.
-# ============================================================================
-
-# --- Core deep learning (CUDA 12.4 builds) ---
-# Install these via the PyTorch CUDA index, e.g.:
-#   pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
+# SO-7B: Python 3.11, PyTorch 2.5.1, Transformers 4.52.0.
+# See docs/installation.md for setup and optional dependencies.
 torch==2.5.1
 torchaudio==2.5.1
 
@@ -45,8 +32,8 @@ tensorboard==2.20.0
 # ----------------------------------------------------------------------------
 # Optional extras (uncomment as needed)
 # ----------------------------------------------------------------------------
-# Flash-Attention 2 — faster training/inference. The trainers default to
-# `--attn-impl sdpa` and run fine without it; install only if you want fa2.
+# Flash-Attention 2 — faster training/inference. For inference, use
+# `--attn-impl sdpa` without requiring it; install only if you want fa2.
 #   pip install flash-attn==2.8.3 --no-build-isolation
 # flash-attn==2.8.3
 

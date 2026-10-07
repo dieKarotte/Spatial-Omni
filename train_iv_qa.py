@@ -492,7 +492,7 @@ class SpatialBeatsQACollator:
     max_audio_samples: int = MAX_AUDIO_SAMPLES
     include_generation_inputs: bool = False
     target_token_rate: float = TARGET_TOKEN_RATE
-    # NEW (eval-only ablation): drop the Qwen mono <|AUDIO|> branch entirely
+    # Eval-only ablation: drop the Qwen mono <|AUDIO|> branch entirely
     # so only <|spatial|> tokens drive the LLM. Used by bench_test_generate_iv
     # for the "decoder-only" baseline. Default False: training is unaffected.
     drop_mono_audio: bool = False
@@ -869,7 +869,7 @@ def build_model(args, processor):
     if device_map is None:
         model.to(args.device)
     # -----------------------------------------------------------------
-    # CRITICAL: re-initialize the IV/Neural-IV adapter + projector weights
+    # re-initialize the IV/Neural-IV adapter + projector weights
     # *after* from_pretrained + model.to(device).
     #
     # Root cause: from_pretrained(low_cpu_mem_usage=True) instantiates the

@@ -1,9 +1,4 @@
-"""Loss and matching skeleton for Spatial-BEATs encoder-only training.
-
-This file defines the target contracts and loss interfaces that supervise the
-fixed-slot readout heads. The internal matching and loss computation logic is
-left unimplemented on purpose.
-"""
+"""Matching, losses, and spatial metrics for SO-Encoder training."""
 
 from dataclasses import dataclass
 import math
@@ -164,10 +159,7 @@ class SpatialLossConfig:
     # (eps splits over 0 siblings = 0 contribution), so behaviour is backward
     # compatible when the list is empty.
     #
-    # This addresses the legacy finding that 40%+ of class errors are
-    # "sibling collapse" (aircraft->speech, frog->bird, vehicle->machine,
-    # etc.).  Class-weighted CE cannot fix sibling collapse on its own
-    # because both classes remain mutually-exclusive under hard CE.
+    # Ontology smoothing distributes label mass among related classes.
     frame_class_ontology_smoothing: float = 0.0
     # Parallel list of sibling groups.  Each entry is a list of class indices
     # belonging to the same AudioSet ontology parent (e.g. "transportation"
@@ -180,10 +172,7 @@ class SpatialLossConfig:
     # when the model exposes ``pred_num_active_logits`` (use_num_active_head=True).
     # 0.0 = loss disabled (default, backward compatible).
     lambda_frame_num_active: float = 0.0
-    # optional focal variant for the num_active CE.  Motivation
-    # (ov3 under-report diagnosis):
-    #   - n_gt=3 frames are ~6% of training ov3 data; vanilla CE learns
-    #     "always predict K̂=2" because the majority class of [0..4] is 2.
+    # Optional focal weighting for the number-of-active-sources loss.
     #   - Focal CE: (1 - p_gt)^gamma * CE up-weights frames where the head
     #     is already wrong (e.g. predicts 2 when truth is 3).
     #   - Optional class weights (indexed 0..num_active_max) further
@@ -219,7 +208,7 @@ class SpatialLossConfig:
     # Applied to all non-padded frames: active=1, inactive=0.
     lambda_framewise_activity: float = 1.0
 
-    # === v13_B [B-2]: Asymmetric Loss (ASL) for activity head ===============
+    # === Asymmetric Loss (ASL) for activity head ===============
     # When frame_activity_loss_type == "asymmetric", the frame-track activity
     # head uses Asymmetric Loss (ICCV 2021) instead of BCE:
     #   positive:  -((1-p)**gamma_pos) * log(p)
@@ -228,7 +217,7 @@ class SpatialLossConfig:
     # Suppresses easy negatives while keeping positive grad strong → raises
     # activity_recall. Default "bce" preserves existing behaviour.
     #
-    # v13_D [D-2]: Top-K rank activity loss.  When set to "topk_rank", uses
+    # Top-K rank activity loss.  When set to "topk_rank", uses
     # pairwise margin hinge between active/inactive slots per frame. Directly
     # aligned with DCASE's "take top-K̂ per frame" decision rule, bypassing the
     # per-element logprob training objective that BCE/ASL both optimize.
@@ -237,11 +226,11 @@ class SpatialLossConfig:
     asl_gamma_pos: float = 0.0
     asl_probability_margin: float = 0.05
 
-    # === v13_D [D-2]: Top-K rank activity loss hyperparameters ==============
+    # === Top-K rank activity loss hyperparameters ==============
     topk_rank_margin: float = 2.0                 # hinge margin in logit space
     topk_rank_bce_weight: float = 0.1             # anchor BCE co-efficient
 
-    # === v13_B [B-4]: Soft macro-F1 auxiliary loss ==========================
+    # === Soft macro-F1 auxiliary loss ==========================
     # When > 0, adds a soft-F1 surrogate loss computed from class-conditional
     # activity probabilities: p_c = sigmoid(act) * softmax(class)[c].
     # Directly aligned with DCASE F20 metric (macro averaging).
@@ -251,7 +240,7 @@ class SpatialLossConfig:
     frame_soft_f1_weight_warmup: float = 0.0      # weight during ep < warmup_epochs
     frame_soft_f1_warmup_epochs: int = 0          # 0 = no warmup, use final directly
 
-    # === v13_C [C-4]: Laplace NLL for log-distance head =====================
+    # === Laplace NLL for log-distance head =====================
     # When "laplace_nll", the frame-track distance loss is computed from
     # pred_distance + pred_distance_log_var via Laplace negative log-likelihood.
     # Requires the model's FrameTrackPredictionHeads to have
@@ -2319,7 +2308,7 @@ def _topk_rank_activity_loss(
     margin: float = 2.0,
     bce_weight: float = 0.1,
 ) -> Tensor:
-    """[D-2] Top-K rank activity loss.
+    """Top-K rank activity loss.
 
     Instead of optimising each (b, k, t) position as an independent binary
     classification, this loss enforces pairwise ranking between active and
@@ -2559,7 +2548,7 @@ def compute_frame_track_losses(
             alpha_t = alpha * activity_target + (1.0 - alpha) * (1.0 - activity_target)
             focal_weight = alpha_t * (1.0 - p_t).pow(config.frame_activity_focal_gamma)
         activity_bce = focal_weight * activity_bce
-    # === v13_B [B-2] Asymmetric Loss (ASL) replacement ======================
+    # === Asymmetric Loss (ASL) replacement ======================
     # When enabled, overwrite activity_bce with ASL (per-element, reduction="none"
     # so the mask+mean pipeline downstream still works).
     _act_loss_type = getattr(config, "frame_activity_loss_type", "bce")
@@ -2573,7 +2562,7 @@ def compute_frame_track_losses(
         )
         loss_activity = _masked_mean(activity_bce, activity_mask)
     elif _act_loss_type == "topk_rank":
-        # v13_D [D-2]: pairwise rank loss over active/inactive slots per frame.
+        # pairwise rank loss over active/inactive slots per frame.
         # valid_time is [B, T_s]. activity_target is [B, K, T_s].
         loss_activity = _topk_rank_activity_loss(
             activity_logit=prediction_output.pred_activity,
@@ -2685,7 +2674,7 @@ def compute_frame_track_losses(
 
         pred_dist_sel = prediction_output.pred_distance[supervise_mask]
         tgt_dist_sel = distance_target[supervise_mask].to(pred_dist_sel.dtype)
-        # === v13_C [C-4] Laplace NLL distance loss ==========================
+        # === Laplace NLL distance loss ==========================
         if (
             getattr(config, "frame_distance_loss_type", "l1") == "laplace_nll"
             and prediction_output.pred_distance_log_var is not None
@@ -2775,7 +2764,7 @@ def compute_frame_track_losses(
                     logits_valid, target_valid, weight=num_active_weights
                 )
 
-    # === v13_B [B-4] Soft macro-F1 auxiliary loss ===========================
+    # === Soft macro-F1 auxiliary loss ===========================
     # Computed as: for each class c, build class-conditional activity prob
     # p_c = sigmoid(act) * softmax(class)[c] and supervise with soft-F1.
     # The target is 1 only on (b,k,t,c=gt_class) where the slot is truly active.
@@ -4066,7 +4055,7 @@ def _build_frame_track_official_segment_dicts(
     pred_azi_deg = pred_azi_deg.cpu()
     pred_ele_deg = pred_ele_deg.cpu()
 
-    # v13_E: per-frame top-K̂ gate. active_bkt[b, k, t] = (prob >= threshold)
+    # per-frame top-K̂ gate. active_bkt[b, k, t] = (prob >= threshold)
     # OR (rank_in_sorted_by_prob < K̂_bt).
     if (
         use_num_active_gate
@@ -4218,7 +4207,7 @@ def accumulate_frame_track_seld(
     When ``use_num_active_gate=True`` and the model exposes a num_active head,
     gating OR's the per-frame top-K̂ mask with the hard activity threshold.
     This lets the official DCASE F20 actually benefit from training the
-    num_active head (v13_E).
+    num_active head.
     """
     nb_classes = int(prediction_output.pred_class_logits.size(-1))
     sample_dicts = _build_frame_track_official_segment_dicts(

@@ -237,7 +237,7 @@ if [[ -n "${QWEN_AUDIO_CACHE_MANIFEST}" ]]; then
   common_args+=(--audio-feature-cache-manifest "${QWEN_AUDIO_CACHE_MANIFEST}")
   echo "[config] audio feature cache = ${QWEN_AUDIO_CACHE_MANIFEST}"
 else
-  echo "[config] audio feature cache = OFF（每个 batch 要 ~400ms 做 mel，强烈建议预计算 cache）"
+  echo "[config] audio feature cache = OFF"
 fi
 if [[ "${VALID_GENERATE_FULL:-0}" == "1" ]]; then
   common_args+=(--valid-generate-full)

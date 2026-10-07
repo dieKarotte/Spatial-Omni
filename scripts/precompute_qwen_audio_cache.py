@@ -52,10 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-spatial-cache",
         action="store_true",
-        help="不缓存 spatial_audio 原始波形。强烈推荐开启！"
-             "原始 20s 4ch FOA 单条 2.5MB × 398K 条 ≈ 1TB，"
-             "而训练时直接 sf.read 只需 5ms（与 Qwen mel 的 400ms 相比可忽略）。"
-             "开启后 cache 仅含 input_features，398K 条仅 ~100GB。",
+        help='Omit spatial waveforms from cache entries; load them from the source audio during training.',
     )
     # 以下两个用于分片并行；手动指定优先级最高，
     # 其次自动从 env RANK/WORLD_SIZE（torchrun 场景）读取。

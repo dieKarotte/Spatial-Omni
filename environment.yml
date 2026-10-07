@@ -1,17 +1,5 @@
-# ============================================================================
-# Conda environment for Spatial-Omni (SO-7B): SO-Encoder + Qwen2.5-Omni-7B.
-#
-# Tested target: Python 3.11, CUDA 12.4, PyTorch 2.5.1 on NVIDIA A100.
-# nvidia-smi may report a higher "CUDA Version" (the driver capability); the
-# cu124 wheels below run on any driver that is 12.4-capable or newer.
-#
-# Create & activate:
-#   conda env create -f environment.yml
-#   conda activate spatial-omni
-#
-# The trainers default to `--attn-impl sdpa`, so flash-attn is NOT required.
-# To enable it later:  pip install flash-attn==2.8.3 --no-build-isolation
-# ============================================================================
+# SO-7B: Python 3.11, PyTorch 2.5.1, Transformers 4.52.0.
+# See docs/installation.md for setup and optional dependencies.
 name: spatial-omni
 channels:
   - conda-forge
