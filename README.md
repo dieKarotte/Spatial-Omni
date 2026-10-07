@@ -212,16 +212,11 @@ Retain predictions, QA IDs, judge cache, and scoring settings. The cache support
 
 ## Results
 
-Results for the **September 2026 SO-7B checkpoints**:
+Results for the **SO variants checkpoints**:
 
-| Model | SO-Bench | MMAU test-mini | MMAU-Pro |
-|---|---:|---:|---:|
-| SO-7B | 70.06% | 60.50% | 45.30% |
-| SO-7B-MIX | 71.72% | 64.50% | 51.86% |
+![Spatial-Omni results](figures/results.png)
 
-SO-Bench uses 7,877 examples; MMAU test-mini uses 1,000 and MMAU-Pro 4,163 unique examples. These checkpoints update the general-audio results of the earlier paper checkpoints. SO-Bench averages task-specific per-question scores, including temporal IoU and the speech indicator WER ≤ 0.5.
-
-The recorded SO-Bench protocol uses `gpt-4o-mini`, 20° azimuth, 10° elevation, **1 m distance and 0.2 s onset** tolerances. Appendix D of the paper states **0.5 m and 0.4 s**; the table uses the recorded protocol shown in the evaluation command.
+SO-Bench uses 7,877 examples. The recorded SO-Bench protocol uses `gpt-4o-mini`, 20° azimuth, 10° elevation, **1 m distance and 0.2 s onset** tolerances.
 
 ## Citation
 
