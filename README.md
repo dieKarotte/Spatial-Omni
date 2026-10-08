@@ -12,14 +12,23 @@ We provide SO-Dataset for encoder and QA training and SO-Bench for evaluation ac
 
 [Quick start](#quick-start) · [Data](#data) · [SO-Encoder](#so-encoder) · [Training](#training) · [Evaluation](#evaluation) · [Results](#results)
 
+## Updates 🔥🔥🔥
+- **[Jun 2026]**: Our paper is released on [arXiv](https://arxiv.org/pdf/2606.10738)! [SO-Dataset](https://huggingface.co/datasets/dieKarotte/SO-Dataset) and [SO-Bench](https://huggingface.co/datasets/dieKarotte/SO-Bench) are available on Hugging Face.
+- **[Jul 2026]**: Base [Spatial-Omni Code](https://github.com/dieKarotte/Spatial-Omni) and [SO-7B checkpoint](https://huggingface.co/dieKarotte/Spatial-Omni/blob/main/SO-7B/so/SO-7B.pt) are released!
+- **[Sep 2026]**: [SO-30B](https://github.com/dieKarotte/Spatial-Omni/tree/SO-30B), [SO-4B](https://github.com/dieKarotte/Spatial-Omni/tree/SO-4B), and [SO-AF3](https://github.com/dieKarotte/Spatial-Omni/tree/SO-AF3) code branch are released! 
+- **[Oct 2026]**: SO-30B, SO-4B, and SO-AF3 checkpoints and corresponding MIX version [checkpoints](https://huggingface.co/dieKarotte/Spatial-Omni) are released!
+- **Coming Soon**: SO-2B, SO-3B, and SO-Kimi checkpoints and code branches...
 ## Models
 
-| Models | Base model | Code | Checkpoints |
+| Family | Base model | Checkpoints | Implementation |
 |---|---|---|---|
-| SO-7B / SO-7B-MIX | Qwen2.5-Omni-7B | [main](https://github.com/dieKarotte/Spatial-Omni/tree/main) | [SO](https://huggingface.co/dieKarotte/Spatial-Omni/tree/main/SO-7B/so) / [MIX](https://huggingface.co/dieKarotte/Spatial-Omni/tree/main/SO-7B/mix) |
-| SO-30B / SO-30B-MIX | Qwen3-Omni-30B-A3B-Instruct | [SO-30B](https://github.com/dieKarotte/Spatial-Omni/tree/SO-30B) | Pending |
-| SO-4B / SO-4B-MIX | Phi-4-multimodal | [SO-4B](https://github.com/dieKarotte/Spatial-Omni/tree/SO-4B) | Pending |
-| SO-AF3 / SO-AF3-MIX | Audio Flamingo 3 | [SO-AF3](https://github.com/dieKarotte/Spatial-Omni/tree/SO-AF3) | Pending |
+| SO-2B | [google/gemma-4-E2B-it](https://huggingface.co/google/gemma-4-E2B-it) | Pending | Pending |
+| SO-3B | [Qwen/Qwen2.5-Omni-3B](https://huggingface.co/Qwen/Qwen2.5-Omni-3B) | Pending | Pending |
+| SO-4B | [microsoft/Phi-4-multimodal-instruct](https://huggingface.co/microsoft/Phi-4-multimodal-instruct) | [SO](SO-4B/so/SO-4B.pt) / [MIX](SO-4B/mix/SO-4B-MIX.pt) | [Code](https://github.com/dieKarotte/Spatial-Omni/tree/SO-4B) |
+| SO-AF3 | [nvidia/audio-flamingo-3](https://huggingface.co/nvidia/audio-flamingo-3) | [SO](SO-AF3/so/SO-AF3.pt) / [MIX](SO-AF3/mix/SO-AF3-MIX.pt) | [Code](https://github.com/dieKarotte/Spatial-Omni/tree/SO-AF3) |
+| SO-Kimi | [moonshotai/Kimi-Audio-7B-Instruct](https://huggingface.co/moonshotai/Kimi-Audio-7B-Instruct) | Pending | Pending | 
+| SO-7B | [Qwen/Qwen2.5-Omni-7B](https://huggingface.co/Qwen/Qwen2.5-Omni-7B) | [SO](SO-7B/so/SO-7B.pt) / [MIX](SO-7B/mix/SO-7B-MIX.pt) | [Code](https://github.com/dieKarotte/Spatial-Omni/tree/main) |
+| SO-30B | [Qwen/Qwen3-Omni-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct) | [SO](SO-30B/so/SO-30B.pt) / [MIX](SO-30B/mix/SO-30B-MIX.pt) | [Code](https://github.com/dieKarotte/Spatial-Omni/tree/SO-30B) |
 
 [SO-Encoder](https://huggingface.co/dieKarotte/Spatial-Omni/tree/main/SO-Encoder) is also available separately. Adaptation checkpoints contain the trained spatial encoder, projector, and language-model LoRA parameters; the original base model is required. SO-7B-MIX adds mono-audio replay and learned null spatial tokens. Each branch has its own environment and training entrypoints.
 
